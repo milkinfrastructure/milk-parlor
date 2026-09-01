@@ -10,20 +10,29 @@ export MILK_UPSTREAM_API_KEY=...
 export MILK_STORE_KIND=local
 export MILK_STORE_ROOT="$PWD/data"
 
-KEY='replace-with-an-operator-key'
-DIGEST="$(printf %s "$KEY" | shasum -a 256 | cut -d' ' -f1)"
+export MILK_API_KEY='replace-with-an-operator-key'
+DIGEST="$(printf %s "$MILK_API_KEY" | shasum -a 256 | cut -d' ' -f1)"
 export MILK_KEYS_JSON="{\"$DIGEST\":{\"scope_id\":\"11111111-1111-4111-8111-111111111111\",\"profile\":\"mechanics\"}}"
 
 cargo run
 ```
 
-Use the key with the official SDK:
+Use the key with the official Python SDK:
 
-```bash
-curl http://127.0.0.1:8080/v1/responses \
-  -H "Authorization: Bearer $KEY" \
-  -H 'Content-Type: application/json' \
-  -d '{"model":"gpt-5.6-luna","input":"Reply with milk."}'
+```python
+import os
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://127.0.0.1:8080/v1",
+    api_key=os.environ["MILK_API_KEY"],
+)
+
+response = client.responses.create(
+    model="gpt-5.6-luna",
+    input="Reply with milk.",
+)
+print(response.output_text)
 ```
 
 Complete captures are stored at:
