@@ -1,6 +1,6 @@
 # Cloudflare deployment
 
-The Worker sends every request to one `lite` container at `parlor.milkinfrastructure.com`. The image workflow publishes the same multi-architecture scratch image to GHCR and the public Docker Hub repository Cloudflare can pull. Configure the GitHub Actions secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` first.
+The Worker sends every request to one `lite` container at `parlor.milkinfrastructure.com`. The image workflow publishes the multi-architecture scratch image to GHCR. On `main`, it loads the Linux AMD64 release and copies it into Cloudflare Registry with pinned Wrangler. Configure the single GitHub Actions secret `CLOUDFLARE_API_TOKEN`; it must permit container image writes for account `d8a5175f959d3dbd4084db9fcab1c44c`.
 
 Set these Worker secrets before the first deployment:
 
