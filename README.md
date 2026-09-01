@@ -7,6 +7,7 @@ Milk Parlor is the small Rust gateway for Milk. It authenticates operator-issued
 ```bash
 export MILK_UPSTREAM_BASE_URL=https://api.openai.com
 export MILK_UPSTREAM_API_KEY=...
+export MILK_STORE_KIND=local
 export MILK_STORE_ROOT="$PWD/data"
 
 KEY='replace-with-an-operator-key'
@@ -44,10 +45,11 @@ Required:
 Optional:
 
 - `MILK_LISTEN` (`0.0.0.0:8080`)
+- `MILK_STORE_KIND` (`local`; set `s3` for S3-compatible storage)
 - `MILK_STORE_ROOT` (`./data`)
 - `MILK_MAX_REQUEST_BYTES` (8 MiB)
 - `MILK_MAX_RESPONSE_BYTES` (16 MiB)
 - `MILK_CAPTURE_MEMORY_BYTES` (64 MiB across active and queued captures)
 - `MILK_CAPTURE_QUEUE` (64)
 
-The first release uses local storage. The store boundary is intentionally limited to `get` and create-only `put`; the S3-compatible implementation follows without changing the HTTP or capture contracts.
+For `MILK_STORE_KIND=s3`, set `MILK_STORE_ENDPOINT`, `MILK_STORE_REGION`, `MILK_STORE_BUCKET`, `MILK_STORE_ACCESS_KEY_ID`, and `MILK_STORE_SECRET_ACCESS_KEY`. `MILK_STORE_SESSION_TOKEN` is optional; `MILK_STORE_PATH_STYLE` defaults to `true` and `MILK_STORE_TIMEOUT_SECONDS` defaults to `30`. The S3 writer uses signed create-only puts and never overwrites a capture.

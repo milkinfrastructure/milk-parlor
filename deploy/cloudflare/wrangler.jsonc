@@ -1,0 +1,40 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "milk-parlor",
+  "main": "worker.js",
+  "compatibility_date": "2026-08-31",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [
+    {
+      "pattern": "parlor.milkinfrastructure.com",
+      "custom_domain": true
+    }
+  ],
+  "containers": [
+    {
+      "class_name": "MilkParlor",
+      "image": "docker.io/milkinfrastructure/milk-parlor:main",
+      "instance_type": "lite",
+      "max_instances": 1
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "MILK_PARLOR",
+        "class_name": "MilkParlor"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["MilkParlor"]
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}

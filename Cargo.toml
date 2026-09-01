@@ -11,6 +11,7 @@ axum = "0.8"
 base64 = "0.22"
 bytes = "1.10"
 futures-util = "0.3"
+hmac = "0.12"
 reqwest = { version = "0.12", default-features = false, features = ["http2", "rustls-tls", "stream"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -21,3 +22,9 @@ tokio = { version = "1.47", features = ["fs", "macros", "net", "rt-multi-thread"
 url = "2.5"
 uuid = { version = "1.18", features = ["serde", "v7"] }
 zstd = "0.13"
+
+[profile.release]
+codegen-units = 1
+lto = true
+panic = "abort"
+strip = true

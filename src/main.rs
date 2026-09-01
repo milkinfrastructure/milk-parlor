@@ -16,9 +16,8 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     env,
-    io::{Cursor, ErrorKind},
+    io::Cursor,
     net::SocketAddr,
-    path::{Component, Path, PathBuf},
     pin::Pin,
     sync::{
         Arc,
@@ -29,13 +28,12 @@ use std::{
 };
 use subtle::ConstantTimeEq;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
-use tokio::{
-    fs,
-    io::AsyncWriteExt,
-    sync::{OwnedSemaphorePermit, Semaphore, mpsc},
-};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use url::Url;
 use uuid::Uuid;
+
+mod store;
+use store::{MAX_GET_BYTES, Store};
 
 const EXCHANGE_SCHEMA: &str = "milk.exchange.v2";
 const DEFAULT_LISTEN: &str = "0.0.0.0:8080";
@@ -43,7 +41,6 @@ const DEFAULT_MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const DEFAULT_CAPTURE_MEMORY_BYTES: usize = 64 * 1024 * 1024;
 const DEFAULT_CAPTURE_QUEUE: usize = 64;
-const MAX_STATUS_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone)]
 struct AppState {
@@ -91,76 +88,6 @@ struct Counters {
     interrupted: AtomicU64,
     storage_failed: AtomicU64,
     writer_alive: AtomicBool,
-}
-
-#[derive(Clone)]
-enum Store {
-    Local(Arc<LocalStore>),
-}
-
-struct LocalStore {
-    root: PathBuf,
-}
-
-impl Store {
-    async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
-        match self {
-            Self::Local(store) => store.get(key).await,
-        }
-    }
-
-    async fn create(&self, key: &str, value: &[u8]) -> Result<()> {
-        match self {
-            Self::Local(store) => store.create(key, value).await,
-        }
-    }
-}
-
-impl LocalStore {
-    fn path(&self, key: &str) -> Result<PathBuf> {
-        let path = Path::new(key);
-        if path.is_absolute()
-            || path
-                .components()
-                .any(|part| !matches!(part, Component::Normal(_)))
-        {
-            bail!("invalid object key");
-        }
-        Ok(self.root.join(path))
-    }
-
-    async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
-        match fs::read(self.path(key)?).await {
-            Ok(value) => Ok(Some(value)),
-            Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error).context("read local object"),
-        }
-    }
-
-    async fn create(&self, key: &str, value: &[u8]) -> Result<()> {
-        let path = self.path(key)?;
-        let parent = path.parent().context("object key has no parent")?;
-        fs::create_dir_all(parent).await?;
-        let temporary = parent.join(format!(".{}.tmp", Uuid::now_v7()));
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-            .await?;
-        if let Err(error) = async {
-            file.write_all(value).await?;
-            file.sync_data().await?;
-            fs::hard_link(&temporary, &path).await?;
-            Result::<(), std::io::Error>::Ok(())
-        }
-        .await
-        {
-            let _ = fs::remove_file(&temporary).await;
-            return Err(error).context("create local object");
-        }
-        fs::remove_file(&temporary).await?;
-        Ok(())
-    }
 }
 
 struct CaptureJob {
@@ -437,9 +364,6 @@ async fn main() -> Result<()> {
     let upstream = parse_upstream(&required_env("MILK_UPSTREAM_BASE_URL")?)?;
     let upstream_api_key: Arc<str> = required_env("MILK_UPSTREAM_API_KEY")?.into();
     let keys = Arc::new(parse_keys(&required_env("MILK_KEYS_JSON")?)?);
-    let store_root =
-        PathBuf::from(env::var("MILK_STORE_ROOT").unwrap_or_else(|_| "./data".to_owned()));
-    fs::create_dir_all(&store_root).await?;
     let max_request_bytes = env_usize(
         "MILK_MAX_REQUEST_BYTES",
         DEFAULT_MAX_REQUEST_BYTES,
@@ -462,7 +386,7 @@ async fn main() -> Result<()> {
 
     let counters = Arc::new(Counters::default());
     counters.writer_alive.store(true, Ordering::Release);
-    let store = Store::Local(Arc::new(LocalStore { root: store_root }));
+    let store = Store::from_environment().await?;
     let (capture_tx, capture_rx) = mpsc::channel(capture_queue);
     tokio::spawn(capture_writer(
         capture_rx,
@@ -536,7 +460,7 @@ async fn api_status(State(state): State<AppState>, headers: HeaderMap) -> Respon
     };
     let object_key = format!("milk/v2/scopes/{}/status/current.json", key.scope_id);
     match state.store.get(&object_key).await {
-        Ok(Some(value)) if value.len() <= MAX_STATUS_BYTES => {
+        Ok(Some(value)) if value.len() <= MAX_GET_BYTES => {
             if serde_json::from_slice::<serde_json::Value>(&value).is_err() {
                 return gateway_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
