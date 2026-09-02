@@ -7,9 +7,11 @@ Create a temporary JSON file outside the repository containing every required Wo
 ```json
 {
   "MILK_KEYS_JSON": "<operator-key-map; each production binding includes its exact route_revision>",
-  "MILK_PARLOR_INSTANCE": "<new parlor-generation for each credential or route cutover>",
-  "MILK_BASELINE_BASE_URL": "<known-good-openai-compatible-origin>",
-  "MILK_BASELINE_API_KEY": "<baseline-key>",
+  "MILK_PARLOR_INSTANCE": "<new parlor-lowercase-generation for each cutover>",
+  "MILK_BASELINE_CHAT_BASE_URL": "<native-chat-provider-prefix-before-v1>",
+  "MILK_BASELINE_CHAT_API_KEY": "<chat-key>",
+  "MILK_BASELINE_RESPONSES_BASE_URL": "<native-responses-provider-prefix-before-v1>",
+  "MILK_BASELINE_RESPONSES_API_KEY": "<responses-key>",
   "MILK_ROUTE_VERIFY_KEY": "<standard-base64-ed25519-public-key>",
   "MILK_STORE_ENDPOINT": "<s3-compatible-endpoint>",
   "MILK_STORE_BUCKET": "<bucket>",
@@ -18,7 +20,7 @@ Create a temporary JSON file outside the repository containing every required Wo
 }
 ```
 
-Add `MILK_CANDIDATE_A_BASE_URL`, `MILK_CANDIDATE_A_API_KEY`, and `MILK_CANDIDATE_A_ARTIFACT_SHA256` together only while a candidate is configured. Add `MILK_STORE_SESSION_TOKEN` only when the S3-compatible backend requires it. Do not commit this file. The Worker supplies the fixed container settings: `MILK_LISTEN=0.0.0.0:8080`, `MILK_STORE_KIND=s3`, `MILK_STORE_REGION=auto`, `MILK_STORE_PATH_STYLE=true`, `MILK_STORE_TIMEOUT_SECONDS=30`, and `MILK_ROUTE_POLL_SECONDS=30`. Upload the complete replacement secret set in one deployment.
+Add `MILK_CANDIDATE_A_ARTIFACT_SHA256` only with at least one complete native pair: `MILK_CANDIDATE_A_CHAT_BASE_URL` and `MILK_CANDIDATE_A_CHAT_API_KEY`, or `MILK_CANDIDATE_A_RESPONSES_BASE_URL` and `MILK_CANDIDATE_A_RESPONSES_API_KEY`. Add `MILK_STORE_SESSION_TOKEN` only when the S3-compatible backend requires it. Do not commit this file. The Worker supplies the fixed container settings: `MILK_LISTEN=0.0.0.0:8080`, `MILK_STORE_KIND=s3`, `MILK_STORE_REGION=auto`, `MILK_STORE_PATH_STYLE=true`, `MILK_STORE_TIMEOUT_SECONDS=30`, and `MILK_ROUTE_POLL_SECONDS=30`. Upload the complete replacement secret set in one deployment.
 
 Validate without uploading, then atomically upload the Worker and its secrets as one version:
 

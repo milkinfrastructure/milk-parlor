@@ -36,6 +36,23 @@ def canonical(value: dict) -> bytes:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
 
 
+def candidate_base_url(name: str, raw: str | None) -> str | None:
+    if raw is None:
+        return None
+    parsed = urllib.parse.urlsplit(raw)
+    if (
+        parsed.scheme not in ("http", "https")
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or parsed.path.rstrip("/").endswith("/v1")
+    ):
+        fail(f"{name} must be an HTTP(S) provider base before the /v1 endpoint")
+    return raw.rstrip("/")
+
+
 def timestamp(raw: str) -> str:
     if not UTC_TIMESTAMP.fullmatch(raw):
         fail("timestamps must be UTC seconds in YYYY-MM-DDTHH:MM:SSZ form")
@@ -179,7 +196,8 @@ def main() -> None:
     parser.add_argument("--scope-id", required=True, type=uuid.UUID)
     parser.add_argument("--revision", required=True, type=int)
     parser.add_argument("--candidate-bps", required=True, type=int)
-    parser.add_argument("--candidate-base-url")
+    parser.add_argument("--candidate-chat-base-url")
+    parser.add_argument("--candidate-responses-base-url")
     parser.add_argument("--candidate-artifact-sha256")
     parser.add_argument("--expires-at", required=True, type=timestamp)
     parser.add_argument("--valid-from", type=timestamp, default=now())
@@ -190,25 +208,25 @@ def main() -> None:
         fail("scope and revision must be nonzero")
     if not 0 <= args.candidate_bps <= 10_000:
         fail("candidate basis points must be in 0..=10000")
+    chat_base_url = candidate_base_url(
+        "candidate Chat base URL", args.candidate_chat_base_url
+    )
+    responses_base_url = candidate_base_url(
+        "candidate Responses base URL", args.candidate_responses_base_url
+    )
     if args.candidate_bps:
-        if not args.candidate_base_url:
-            fail("an active candidate requires its exact deployed base URL")
-        parsed_base = urllib.parse.urlsplit(args.candidate_base_url)
-        if (
-            parsed_base.scheme not in ("http", "https")
-            or not parsed_base.hostname
-            or parsed_base.username
-            or parsed_base.password
-            or parsed_base.query
-            or parsed_base.fragment
-        ):
-            fail("candidate base URL is invalid")
+        if chat_base_url is None and responses_base_url is None:
+            fail("an active candidate requires at least one native protocol base URL")
         if not args.candidate_artifact_sha256 or not re.fullmatch(
             r"[0-9a-f]{64}", args.candidate_artifact_sha256
         ):
             fail("an active candidate requires a lowercase SHA-256 artifact digest")
-    elif args.candidate_base_url is not None or args.candidate_artifact_sha256 is not None:
-        fail("a zero route must omit the candidate base URL and artifact digest")
+    elif (
+        chat_base_url is not None
+        or responses_base_url is not None
+        or args.candidate_artifact_sha256 is not None
+    ):
+        fail("a zero route must omit candidate protocol URLs and artifact digest")
     if args.valid_from >= args.expires_at:
         fail("route expiry must follow its start")
     key_mode = stat.S_IMODE(args.signing_key.stat().st_mode)
@@ -218,30 +236,40 @@ def main() -> None:
     route_id = args.route_id or uuid.uuid4()
     if route_id.int == 0:
         fail("route ID must be nonzero")
-    candidate_binding_sha256 = None
+    candidate_protocols = {}
     if args.candidate_bps:
-        candidate_binding_sha256 = hashlib.sha256(
-            canonical(
-                {
-                    "base_url": args.candidate_base_url,
-                    "artifact_sha256": args.candidate_artifact_sha256,
-                }
-            )
-        ).hexdigest()
+        for protocol, base_url in (
+            ("chat_completions", chat_base_url),
+            ("responses", responses_base_url),
+        ):
+            if base_url is not None:
+                candidate_protocols[protocol] = hashlib.sha256(
+                    canonical(
+                        {
+                            "artifact_sha256": args.candidate_artifact_sha256,
+                            "base_url": base_url,
+                            "protocol": protocol,
+                        }
+                    )
+                ).hexdigest()
     route_unsigned = {
-        "schema_version": "milk.route.v2",
+        "schema_version": "milk.route.v3",
         "scope_id": str(args.scope_id),
         "route_id": str(route_id),
         "revision": args.revision,
         "valid_from": args.valid_from,
         "expires_at": args.expires_at,
         "baseline": "baseline",
-        "candidate": "candidate-a" if args.candidate_bps else None,
-        "candidate_artifact_sha256": (
-            args.candidate_artifact_sha256 if args.candidate_bps else None
+        "candidate": (
+            {
+                "target": "candidate-a",
+                "artifact_sha256": args.candidate_artifact_sha256,
+                "basis_points": args.candidate_bps,
+                "protocols": candidate_protocols,
+            }
+            if args.candidate_bps
+            else None
         ),
-        "candidate_binding_sha256": candidate_binding_sha256,
-        "candidate_basis_points": args.candidate_bps,
     }
     route = canonical({**route_unsigned, "signature": sign(args.signing_key, canonical(route_unsigned))})
     route_sha256 = hashlib.sha256(route).hexdigest()
@@ -282,7 +310,7 @@ def main() -> None:
                 "revision": args.revision,
                 "candidate_basis_points": args.candidate_bps,
                 "candidate_artifact_sha256": args.candidate_artifact_sha256,
-                "candidate_binding_sha256": candidate_binding_sha256,
+                "candidate_protocols": candidate_protocols,
                 "route_sha256": route_sha256,
             },
             separators=(",", ":"),

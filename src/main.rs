@@ -34,7 +34,7 @@ use uuid::Uuid;
 
 mod route;
 mod store;
-use route::{RouteManager, Target, parse_verifying_key};
+use route::{Protocol, RouteManager, Target, parse_verifying_key};
 use store::{MAX_GET_BYTES, Store};
 
 const EXCHANGE_SCHEMA: &str = "milk.exchange.v2";
@@ -47,7 +47,7 @@ const DEFAULT_CAPTURE_QUEUE: usize = 64;
 #[derive(Clone)]
 struct AppState {
     client: reqwest::Client,
-    baseline: UpstreamBinding,
+    baseline: ProtocolBindings,
     candidate_a: Option<CandidateBinding>,
     keys: Arc<Vec<OperatorKey>>,
     routes: RouteManager,
@@ -68,16 +68,47 @@ struct UpstreamBinding {
 }
 
 #[derive(Clone)]
-struct CandidateBinding {
+struct ProtocolBindings {
+    chat_completions: UpstreamBinding,
+    responses: UpstreamBinding,
+}
+
+impl ProtocolBindings {
+    fn get(&self, protocol: Protocol) -> &UpstreamBinding {
+        match protocol {
+            Protocol::ChatCompletions => &self.chat_completions,
+            Protocol::Responses => &self.responses,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct CandidateProtocolBinding {
     upstream: UpstreamBinding,
-    artifact_sha256: Arc<str>,
     binding_sha256: Arc<str>,
+}
+
+#[derive(Clone)]
+struct CandidateBinding {
+    artifact_sha256: Arc<str>,
+    chat_completions: Option<CandidateProtocolBinding>,
+    responses: Option<CandidateProtocolBinding>,
+}
+
+impl CandidateBinding {
+    fn get(&self, protocol: Protocol) -> Option<&CandidateProtocolBinding> {
+        match protocol {
+            Protocol::ChatCompletions => self.chat_completions.as_ref(),
+            Protocol::Responses => self.responses.as_ref(),
+        }
+    }
 }
 
 #[derive(Serialize)]
 struct CandidateIdentity<'a> {
-    base_url: &'a str,
     artifact_sha256: &'a str,
+    base_url: &'a str,
+    protocol: Protocol,
 }
 
 #[derive(Clone)]
@@ -409,12 +440,15 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| DEFAULT_LISTEN.to_owned())
         .parse()
         .context("MILK_LISTEN must be a socket address")?;
-    let baseline = UpstreamBinding {
-        base_url: parse_upstream(
-            "MILK_BASELINE_BASE_URL",
-            &required_env("MILK_BASELINE_BASE_URL")?,
+    let baseline = ProtocolBindings {
+        chat_completions: required_upstream(
+            "MILK_BASELINE_CHAT_BASE_URL",
+            "MILK_BASELINE_CHAT_API_KEY",
         )?,
-        api_key: required_env("MILK_BASELINE_API_KEY")?.into(),
+        responses: required_upstream(
+            "MILK_BASELINE_RESPONSES_BASE_URL",
+            "MILK_BASELINE_RESPONSES_API_KEY",
+        )?,
     };
     let candidate_a = optional_candidate_binding()?;
     let keys = Arc::new(parse_keys(&required_env("MILK_KEYS_JSON")?)?);
@@ -511,8 +545,15 @@ async fn status_page() -> Html<&'static str> {
 
 async fn health(State(state): State<AppState>) -> impl IntoResponse {
     let counters = &state.counters;
+    let candidate = state.candidate_a.as_ref();
     Json(serde_json::json!({
         "status": "ok",
+        "protocols": {
+            "chat_completions": true,
+            "responses": true,
+            "candidate_chat_completions": candidate.is_some_and(|value| value.chat_completions.is_some()),
+            "candidate_responses": candidate.is_some_and(|value| value.responses.is_some())
+        },
         "capture": {
             "writer_alive": counters.writer_alive.load(Ordering::Acquire),
             "observed": counters.observed.load(Ordering::Relaxed),
@@ -588,11 +629,18 @@ async fn proxy(State(state): State<AppState>, request: Request) -> Response {
     let started = Instant::now();
     let started_at = utc_now();
     let exchange_id = Uuid::now_v7();
-    let endpoint = match request.uri().path() {
-        "/v1/chat/completions" => "chat_completions",
-        "/v1/responses" => "responses",
-        _ => "other",
+    let protocol = match request.uri().path() {
+        "/v1/chat/completions" => Protocol::ChatCompletions,
+        "/v1/responses" => Protocol::Responses,
+        _ => {
+            return gateway_error(
+                StatusCode::NOT_FOUND,
+                "unsupported_endpoint",
+                "The requested inference endpoint is not supported.",
+            );
+        }
     };
+    let endpoint = protocol.as_str();
     let method = request.method().clone();
     let path_and_query = request
         .uri()
@@ -631,17 +679,22 @@ async fn proxy(State(state): State<AppState>, request: Request) -> Response {
         operator.scope_id,
         operator.profile == Profile::Production,
         exchange_id,
+        protocol,
     );
     let mut route_target = route.target;
     let mut fallback_reason = None;
     let mut first_chunk = None;
     let mut expected_response_bytes = None;
     let upstream = if route.target == Target::CandidateA {
-        let candidate = state.candidate_a.as_ref().filter(|candidate| {
-            route.candidate_artifact_sha256.as_deref() == Some(candidate.artifact_sha256.as_ref())
-                && route.candidate_binding_sha256.as_deref()
-                    == Some(candidate.binding_sha256.as_ref())
-        });
+        let configured_candidate = state.candidate_a.as_ref();
+        let candidate = configured_candidate
+            .and_then(|candidate| candidate.get(protocol).map(|binding| (candidate, binding)))
+            .filter(|(candidate, binding)| {
+                route.candidate_artifact_sha256.as_deref()
+                    == Some(candidate.artifact_sha256.as_ref())
+                    && route.candidate_binding_sha256.as_deref()
+                        == Some(binding.binding_sha256.as_ref())
+            });
         let attempt = match (state.candidate_a.as_ref(), candidate) {
             (None, _) => Err((
                 "candidate_unconfigured".to_owned(),
@@ -649,9 +702,9 @@ async fn proxy(State(state): State<AppState>, request: Request) -> Response {
             )),
             (Some(_), None) => Err((
                 "candidate_identity_mismatch".to_owned(),
-                anyhow!("signed candidate artifact does not match the configured binding"),
+                anyhow!("signed candidate protocol binding does not match the configured binding"),
             )),
-            (_, Some(candidate)) => {
+            (_, Some((_, candidate))) => {
                 send_candidate(
                     &state,
                     candidate,
@@ -675,7 +728,7 @@ async fn proxy(State(state): State<AppState>, request: Request) -> Response {
                 route_target = Target::Baseline;
                 match send_upstream(
                     &state,
-                    &state.baseline,
+                    state.baseline.get(protocol),
                     &method,
                     &path_and_query,
                     &forwarded_headers,
@@ -691,7 +744,7 @@ async fn proxy(State(state): State<AppState>, request: Request) -> Response {
     } else {
         match send_upstream(
             &state,
-            &state.baseline,
+            state.baseline.get(protocol),
             &method,
             &path_and_query,
             &forwarded_headers,
@@ -947,7 +1000,7 @@ async fn send_upstream(
 
 async fn send_candidate(
     state: &AppState,
-    candidate: &CandidateBinding,
+    candidate: &CandidateProtocolBinding,
     method: &axum::http::Method,
     path_and_query: &str,
     headers: &reqwest::header::HeaderMap,
@@ -1161,34 +1214,81 @@ fn parse_upstream(name: &str, raw: &str) -> Result<Url> {
     {
         bail!("{name} must be an HTTP(S) base URL without credentials, query, or fragment");
     }
+    if url.path().trim_end_matches('/').ends_with("/v1") {
+        bail!("{name} must stop before /v1 because Parlor appends the client endpoint path");
+    }
     Ok(url)
 }
 
-fn optional_candidate_binding() -> Result<Option<CandidateBinding>> {
-    let base_url = optional_env("MILK_CANDIDATE_A_BASE_URL")?;
-    let api_key = optional_env("MILK_CANDIDATE_A_API_KEY")?;
-    let artifact_sha256 = optional_env("MILK_CANDIDATE_A_ARTIFACT_SHA256")?;
-    match (base_url, api_key, artifact_sha256) {
-        (None, None, None) => Ok(None),
-        (Some(base_url), Some(api_key), Some(artifact_sha256)) => {
-            require_sha256("MILK_CANDIDATE_A_ARTIFACT_SHA256", &artifact_sha256)?;
+fn required_upstream(base_name: &str, key_name: &str) -> Result<UpstreamBinding> {
+    Ok(UpstreamBinding {
+        base_url: parse_upstream(base_name, &required_env(base_name)?)?,
+        api_key: required_env(key_name)?.into(),
+    })
+}
+
+fn optional_upstream(base_name: &str, key_name: &str) -> Result<Option<UpstreamBinding>> {
+    match (optional_env(base_name)?, optional_env(key_name)?) {
+        (None, None) => Ok(None),
+        (Some(base_url), Some(api_key)) => Ok(Some(UpstreamBinding {
+            base_url: parse_upstream(base_name, &base_url)?,
+            api_key: api_key.into(),
+        })),
+        _ => bail!("{base_name} and {key_name} must be set together"),
+    }
+}
+
+fn candidate_protocol_binding(
+    protocol: Protocol,
+    upstream: Option<UpstreamBinding>,
+    artifact_sha256: &str,
+) -> Result<Option<CandidateProtocolBinding>> {
+    upstream
+        .map(|upstream| {
+            let base_url = upstream.base_url.as_str().trim_end_matches('/');
             let binding_sha256 = sha256_hex(&serde_json::to_vec(&CandidateIdentity {
-                base_url: &base_url,
-                artifact_sha256: &artifact_sha256,
+                artifact_sha256,
+                base_url,
+                protocol,
             })?);
-            Ok(Some(CandidateBinding {
-                upstream: UpstreamBinding {
-                    base_url: parse_upstream("MILK_CANDIDATE_A_BASE_URL", &base_url)?,
-                    api_key: api_key.into(),
-                },
-                artifact_sha256: artifact_sha256.into(),
+            Ok(CandidateProtocolBinding {
+                upstream,
                 binding_sha256: binding_sha256.into(),
+            })
+        })
+        .transpose()
+}
+
+fn optional_candidate_binding() -> Result<Option<CandidateBinding>> {
+    let artifact_sha256 = optional_env("MILK_CANDIDATE_A_ARTIFACT_SHA256")?;
+    let chat = optional_upstream(
+        "MILK_CANDIDATE_A_CHAT_BASE_URL",
+        "MILK_CANDIDATE_A_CHAT_API_KEY",
+    )?;
+    let responses = optional_upstream(
+        "MILK_CANDIDATE_A_RESPONSES_BASE_URL",
+        "MILK_CANDIDATE_A_RESPONSES_API_KEY",
+    )?;
+    match artifact_sha256 {
+        None if chat.is_none() && responses.is_none() => Ok(None),
+        None => bail!("candidate protocol bindings require MILK_CANDIDATE_A_ARTIFACT_SHA256"),
+        Some(artifact_sha256) if chat.is_some() || responses.is_some() => {
+            require_sha256("MILK_CANDIDATE_A_ARTIFACT_SHA256", &artifact_sha256)?;
+            Ok(Some(CandidateBinding {
+                chat_completions: candidate_protocol_binding(
+                    Protocol::ChatCompletions,
+                    chat,
+                    &artifact_sha256,
+                )?,
+                responses: candidate_protocol_binding(
+                    Protocol::Responses,
+                    responses,
+                    &artifact_sha256,
+                )?,
+                artifact_sha256: artifact_sha256.into(),
             }))
         }
-        _ => bail!(
-            "MILK_CANDIDATE_A_BASE_URL, MILK_CANDIDATE_A_API_KEY, and \
-             MILK_CANDIDATE_A_ARTIFACT_SHA256 must be set together"
-        ),
+        Some(_) => bail!("a candidate artifact requires at least one complete protocol binding"),
     }
 }
 

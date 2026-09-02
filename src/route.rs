@@ -4,7 +4,7 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use crate::store::Store;
 
-const ROUTE_SCHEMA: &str = "milk.route.v2";
+const ROUTE_SCHEMA: &str = "milk.route.v3";
 const POINTER_SCHEMA: &str = "milk.route-pointer.v2";
 
 #[derive(Clone)]
@@ -29,6 +29,22 @@ pub(crate) struct RouteManager {
 pub(crate) enum Target {
     Baseline,
     CandidateA,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Protocol {
+    ChatCompletions,
+    Responses,
+}
+
+impl Protocol {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::ChatCompletions => "chat_completions",
+            Self::Responses => "responses",
+        }
+    }
 }
 
 impl Target {
@@ -61,10 +77,16 @@ struct VerifiedRoute {
     route_sha256: String,
     valid_from: OffsetDateTime,
     expires_at: OffsetDateTime,
-    candidate: Option<Binding>,
-    candidate_artifact_sha256: Option<String>,
-    candidate_binding_sha256: Option<String>,
-    candidate_basis_points: u16,
+    candidate: Option<CandidateRoute>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CandidateRoute {
+    target: Binding,
+    artifact_sha256: String,
+    basis_points: u16,
+    protocols: BTreeMap<Protocol, String>,
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
@@ -85,10 +107,7 @@ struct SignedRoute {
     valid_from: String,
     expires_at: String,
     baseline: Binding,
-    candidate: Option<Binding>,
-    candidate_artifact_sha256: Option<String>,
-    candidate_binding_sha256: Option<String>,
-    candidate_basis_points: u16,
+    candidate: Option<CandidateRoute>,
     signature: String,
 }
 
@@ -101,10 +120,7 @@ struct UnsignedRoute<'a> {
     valid_from: &'a str,
     expires_at: &'a str,
     baseline: Binding,
-    candidate: Option<Binding>,
-    candidate_artifact_sha256: Option<&'a str>,
-    candidate_binding_sha256: Option<&'a str>,
-    candidate_basis_points: u16,
+    candidate: Option<&'a CandidateRoute>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -150,6 +166,7 @@ impl RouteManager {
         scope_id: Uuid,
         production: bool,
         exchange_id: Uuid,
+        protocol: Protocol,
     ) -> RouteChoice {
         if !production {
             return RouteChoice {
@@ -186,9 +203,15 @@ impl RouteManager {
                 candidate_binding_sha256: None,
             };
         };
-        let target = if matches!(route.candidate, Some(Binding::CandidateA))
-            && assigned_to_candidate(route.route_id, exchange_id, route.candidate_basis_points)
-        {
+        let candidate_binding_sha256 = route
+            .candidate
+            .as_ref()
+            .and_then(|candidate| candidate.protocols.get(&protocol))
+            .cloned();
+        let target = if candidate_binding_sha256.is_some()
+            && route.candidate.as_ref().is_some_and(|candidate| {
+                assigned_to_candidate(route.route_id, exchange_id, candidate.basis_points)
+            }) {
             Target::CandidateA
         } else {
             Target::Baseline
@@ -196,8 +219,11 @@ impl RouteManager {
         RouteChoice {
             route_id: Some(route.route_id),
             target,
-            candidate_artifact_sha256: route.candidate_artifact_sha256,
-            candidate_binding_sha256: route.candidate_binding_sha256,
+            candidate_artifact_sha256: route
+                .candidate
+                .as_ref()
+                .map(|candidate| candidate.artifact_sha256.clone()),
+            candidate_binding_sha256,
         }
     }
 
@@ -333,16 +359,19 @@ fn parse_route(
     {
         bail!("route object fields are invalid");
     }
-    match (
-        route.candidate,
-        route.candidate_artifact_sha256.as_deref(),
-        route.candidate_binding_sha256.as_deref(),
-        route.candidate_basis_points,
-    ) {
-        (None, None, None, 0) => {}
-        (Some(Binding::CandidateA), Some(artifact), Some(binding), 1..=10_000)
-            if is_sha256(artifact) && is_sha256(binding) => {}
-        _ => bail!("route candidate and basis points are inconsistent"),
+    if let Some(candidate) = &route.candidate {
+        if !matches!(candidate.target, Binding::CandidateA)
+            || !is_sha256(&candidate.artifact_sha256)
+            || !(1..=10_000).contains(&candidate.basis_points)
+            || candidate.protocols.is_empty()
+            || candidate.protocols.len() > 2
+            || candidate
+                .protocols
+                .values()
+                .any(|digest| !is_sha256(digest))
+        {
+            bail!("route candidate is invalid");
+        }
     }
     let valid_from = canonical_time(&route.valid_from)?;
     let expires_at = canonical_time(&route.expires_at)?;
@@ -357,10 +386,7 @@ fn parse_route(
         valid_from: &route.valid_from,
         expires_at: &route.expires_at,
         baseline: route.baseline,
-        candidate: route.candidate,
-        candidate_artifact_sha256: route.candidate_artifact_sha256.as_deref(),
-        candidate_binding_sha256: route.candidate_binding_sha256.as_deref(),
-        candidate_basis_points: route.candidate_basis_points,
+        candidate: route.candidate.as_ref(),
     };
     verify_signature(
         verifying_key,
@@ -374,9 +400,6 @@ fn parse_route(
         valid_from,
         expires_at,
         candidate: route.candidate,
-        candidate_artifact_sha256: route.candidate_artifact_sha256,
-        candidate_binding_sha256: route.candidate_binding_sha256,
-        candidate_basis_points: route.candidate_basis_points,
     })
 }
 

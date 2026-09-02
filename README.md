@@ -1,12 +1,14 @@
 # Milk Parlor
 
-Milk Parlor is the small Rust gateway for Milk. It authenticates operator-issued keys, forwards OpenAI-compatible Chat Completions and Responses requests, streams the upstream response, and writes a compressed two-sided exchange to object storage after a complete response. Capture failure never changes the customer response.
+Milk Parlor is the small Rust gateway for Milk. It authenticates operator-issued keys, tunnels OpenAI-compatible Chat Completions and Responses requests to protocol-native upstreams, streams the response, and writes a compressed two-sided exchange to object storage after a complete response. Capture failure never changes the customer response.
 
 ## Run
 
 ```bash
-export MILK_BASELINE_BASE_URL=https://api.openai.com
-export MILK_BASELINE_API_KEY=...
+export MILK_BASELINE_CHAT_BASE_URL=https://api.openai.com
+export MILK_BASELINE_CHAT_API_KEY=...
+export MILK_BASELINE_RESPONSES_BASE_URL=https://api.openai.com
+export MILK_BASELINE_RESPONSES_API_KEY=...
 export MILK_ROUTE_VERIFY_KEY=... # standard base64 Ed25519 public key
 export MILK_STORE_KIND=local
 export MILK_STORE_ROOT="$PWD/data"
@@ -49,7 +51,8 @@ milk/v2/scopes/<scope_uuid>/c/<exchange_uuidv7>.json.zst
 Required:
 
 - `MILK_KEYS_JSON`: object mapping lowercase SHA-256 key digests to `scope_id` and `profile` (`production` or `mechanics`). Every production binding also carries its exact nonzero `route_revision`; mechanics bindings omit it.
-- `MILK_BASELINE_BASE_URL` and `MILK_BASELINE_API_KEY`: known-good OpenAI-compatible binding.
+- `MILK_BASELINE_CHAT_BASE_URL` and `MILK_BASELINE_CHAT_API_KEY`: known-good native Chat Completions binding.
+- `MILK_BASELINE_RESPONSES_BASE_URL` and `MILK_BASELINE_RESPONSES_API_KEY`: known-good native Responses binding. The two protocols may use different providers and keys. Base URLs are provider prefixes before `/v1`; Parlor appends the exact client endpoint and never translates one API into the other.
 - `MILK_ROUTE_VERIFY_KEY`: standard-base64 encoding of the 32-byte Ed25519 route verification key.
 
 Optional:
@@ -62,7 +65,7 @@ Optional:
 - `MILK_CAPTURE_MEMORY_BYTES` (64 MiB across active and queued captures)
 - `MILK_CAPTURE_QUEUE` (64)
 - `MILK_ROUTE_POLL_SECONDS` (30)
-- `MILK_CANDIDATE_A_BASE_URL`, `MILK_CANDIDATE_A_API_KEY`, and `MILK_CANDIDATE_A_ARTIFACT_SHA256`: the optional canary binding; set all three or none.
+- `MILK_CANDIDATE_A_ARTIFACT_SHA256` plus one or both complete native protocol pairs: `MILK_CANDIDATE_A_CHAT_BASE_URL` with `MILK_CANDIDATE_A_CHAT_API_KEY`, and `MILK_CANDIDATE_A_RESPONSES_BASE_URL` with `MILK_CANDIDATE_A_RESPONSES_API_KEY`. A signed route can select only protocols explicitly implemented by the candidate.
 - `MILK_CANDIDATE_HEADER_TIMEOUT_SECONDS` (30)
 - `MILK_CANDIDATE_FIRST_BYTE_TIMEOUT_SECONDS` (120)
 
@@ -70,9 +73,9 @@ For `MILK_STORE_KIND=s3`, set `MILK_STORE_ENDPOINT`, `MILK_STORE_REGION`, `MILK_
 
 ## Signed routes
 
-Only production scopes consume routes. Mechanics traffic always uses `baseline`. Requests read the in-memory route cache and never wait for object storage; one background refresh per scope verifies the canonical `milk.route-pointer.v2` and immutable `milk.route.v2` objects. A miss, failed refresh, or expired route uses `baseline` or the last unexpired verified route.
+Only production scopes consume routes. Mechanics traffic always uses `baseline`. Requests read the in-memory route cache and never wait for object storage; one background refresh per scope verifies the canonical `milk.route-pointer.v2` and immutable `milk.route.v3` objects. A miss, failed refresh, or expired route uses `baseline` or the last unexpired verified route.
 
-An active route signs the exact candidate artifact SHA-256 and a canonical SHA-256 over its base URL plus artifact digest. Parlor sends candidate traffic only when both match the configured binding; an absent binding records `candidate_unconfigured`, a mismatch records `candidate_identity_mismatch`, and both use baseline. Captures retain both digests. Assignment is deterministic from SHA-256 over the raw route UUID followed by the exchange UUID. Candidate connection/header timeout, 429, 5xx, invalid headers, or failure before the first response byte uses baseline. After the first byte, the response streams without a gateway deadline.
+An active route signs the exact candidate artifact SHA-256, basis points, and a binding digest for every eligible protocol. Each binding digest covers the protocol, provider base URL, and artifact digest. Parlor considers the candidate only when the request protocol is signed and the deployed native binding matches; unsupported protocols go directly to their baseline without a failed candidate call. An absent or mismatched signed binding fails to baseline. Captures retain the client protocol, target, artifact digest, binding digest, and fallback reason. Assignment is deterministic from SHA-256 over the raw route UUID followed by the exchange UUID. Candidate connection/header timeout, 429, 5xx, invalid headers, or failure before the first response byte uses the same protocol's baseline. After the first byte, the response streams without a gateway deadline.
 
 Route signing is an operator action, not a Milk Man tool. Generate a key and derive the deployment value without exposing the private key:
 
@@ -90,7 +93,7 @@ With the S3 variables above exported, publish a higher revision:
   --signing-key /secure/milk-route.pem \
   --scope-id 11111111-1111-4111-8111-111111111111 \
   --revision 1 --candidate-bps 100 \
-  --candidate-base-url https://candidate.example.com \
+  --candidate-chat-base-url https://candidate.example.com \
   --candidate-artifact-sha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
   --expires-at 2026-09-02T00:00:00Z
 ```

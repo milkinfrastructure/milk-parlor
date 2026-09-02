@@ -2,14 +2,25 @@ import { Container, getContainer } from "@cloudflare/containers";
 import { env } from "cloudflare:workers";
 
 function containerEnvironment(bindings) {
-  const candidate = [
-    bindings.MILK_CANDIDATE_A_BASE_URL,
-    bindings.MILK_CANDIDATE_A_API_KEY,
-    bindings.MILK_CANDIDATE_A_ARTIFACT_SHA256,
+  const candidateChat = [
+    bindings.MILK_CANDIDATE_A_CHAT_BASE_URL,
+    bindings.MILK_CANDIDATE_A_CHAT_API_KEY,
   ];
-  const configured = candidate.filter((value) => value !== undefined).length;
-  if (configured !== 0 && configured !== candidate.length) {
-    throw new Error("candidate URL, key, and artifact digest must be set together");
+  const candidateResponses = [
+    bindings.MILK_CANDIDATE_A_RESPONSES_BASE_URL,
+    bindings.MILK_CANDIDATE_A_RESPONSES_API_KEY,
+  ];
+  for (const pair of [candidateChat, candidateResponses]) {
+    const configured = pair.filter((value) => value !== undefined).length;
+    if (configured !== 0 && configured !== pair.length) {
+      throw new Error("each candidate protocol URL and key must be set together");
+    }
+  }
+  const candidateConfigured = [...candidateChat, ...candidateResponses].some(
+    (value) => value !== undefined,
+  );
+  if (candidateConfigured !== (bindings.MILK_CANDIDATE_A_ARTIFACT_SHA256 !== undefined)) {
+    throw new Error("candidate protocol bindings and artifact digest must be set together");
   }
   return {
     MILK_LISTEN: "0.0.0.0:8080",
@@ -18,20 +29,33 @@ function containerEnvironment(bindings) {
     MILK_STORE_PATH_STYLE: "true",
     MILK_STORE_TIMEOUT_SECONDS: "30",
     MILK_KEYS_JSON: bindings.MILK_KEYS_JSON,
-    MILK_BASELINE_BASE_URL: bindings.MILK_BASELINE_BASE_URL,
-    MILK_BASELINE_API_KEY: bindings.MILK_BASELINE_API_KEY,
+    MILK_BASELINE_CHAT_BASE_URL: bindings.MILK_BASELINE_CHAT_BASE_URL,
+    MILK_BASELINE_CHAT_API_KEY: bindings.MILK_BASELINE_CHAT_API_KEY,
+    MILK_BASELINE_RESPONSES_BASE_URL: bindings.MILK_BASELINE_RESPONSES_BASE_URL,
+    MILK_BASELINE_RESPONSES_API_KEY: bindings.MILK_BASELINE_RESPONSES_API_KEY,
     MILK_ROUTE_VERIFY_KEY: bindings.MILK_ROUTE_VERIFY_KEY,
     MILK_ROUTE_POLL_SECONDS: "30",
     MILK_STORE_ENDPOINT: bindings.MILK_STORE_ENDPOINT,
     MILK_STORE_BUCKET: bindings.MILK_STORE_BUCKET,
     MILK_STORE_ACCESS_KEY_ID: bindings.MILK_STORE_ACCESS_KEY_ID,
     MILK_STORE_SECRET_ACCESS_KEY: bindings.MILK_STORE_SECRET_ACCESS_KEY,
-    ...(configured === 0
+    ...(!candidateConfigured
       ? {}
       : {
-          MILK_CANDIDATE_A_BASE_URL: candidate[0],
-          MILK_CANDIDATE_A_API_KEY: candidate[1],
-          MILK_CANDIDATE_A_ARTIFACT_SHA256: candidate[2],
+          MILK_CANDIDATE_A_ARTIFACT_SHA256:
+            bindings.MILK_CANDIDATE_A_ARTIFACT_SHA256,
+          ...(candidateChat[0] === undefined
+            ? {}
+            : {
+                MILK_CANDIDATE_A_CHAT_BASE_URL: candidateChat[0],
+                MILK_CANDIDATE_A_CHAT_API_KEY: candidateChat[1],
+              }),
+          ...(candidateResponses[0] === undefined
+            ? {}
+            : {
+                MILK_CANDIDATE_A_RESPONSES_BASE_URL: candidateResponses[0],
+                MILK_CANDIDATE_A_RESPONSES_API_KEY: candidateResponses[1],
+              }),
         }),
     ...(bindings.MILK_STORE_SESSION_TOKEN === undefined
       ? {}

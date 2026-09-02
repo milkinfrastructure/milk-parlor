@@ -10,8 +10,10 @@
     "required": [
       "MILK_KEYS_JSON",
       "MILK_PARLOR_INSTANCE",
-      "MILK_BASELINE_BASE_URL",
-      "MILK_BASELINE_API_KEY",
+      "MILK_BASELINE_CHAT_BASE_URL",
+      "MILK_BASELINE_CHAT_API_KEY",
+      "MILK_BASELINE_RESPONSES_BASE_URL",
+      "MILK_BASELINE_RESPONSES_API_KEY",
       "MILK_ROUTE_VERIFY_KEY",
       "MILK_STORE_ENDPOINT",
       "MILK_STORE_BUCKET",
@@ -28,7 +30,7 @@
   "containers": [
     {
       "class_name": "MilkParlor",
-      "image": "registry.cloudflare.com/d8a5175f959d3dbd4084db9fcab1c44c/milk-parlor@sha256:545ef3a0ccef16b20e0fe689d59fd7dff06651fcb6d00dbd1ecd51be53bde728",
+      "image": "registry.cloudflare.com/d8a5175f959d3dbd4084db9fcab1c44c/milk-parlor@sha256:c18888abaede0aa8d42f255c64d5d7dc5c6ad3e05daf569b40d39877c1360ff8",
       "instance_type": "lite",
       "max_instances": 10
     }
