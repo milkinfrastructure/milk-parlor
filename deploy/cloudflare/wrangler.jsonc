@@ -9,8 +9,9 @@
   "secrets": {
     "required": [
       "MILK_KEYS_JSON",
-      "MILK_UPSTREAM_BASE_URL",
-      "MILK_UPSTREAM_API_KEY",
+      "MILK_BASELINE_BASE_URL",
+      "MILK_BASELINE_API_KEY",
+      "MILK_ROUTE_VERIFY_KEY",
       "MILK_STORE_ENDPOINT",
       "MILK_STORE_BUCKET",
       "MILK_STORE_ACCESS_KEY_ID",

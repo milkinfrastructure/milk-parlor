@@ -14,7 +14,7 @@ use reqwest::redirect::Policy;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     env,
     io::Cursor,
     net::SocketAddr,
@@ -32,7 +32,9 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use url::Url;
 use uuid::Uuid;
 
+mod route;
 mod store;
+use route::{RouteManager, Target, parse_verifying_key};
 use store::{MAX_GET_BYTES, Store};
 
 const EXCHANGE_SCHEMA: &str = "milk.exchange.v2";
@@ -45,15 +47,37 @@ const DEFAULT_CAPTURE_QUEUE: usize = 64;
 #[derive(Clone)]
 struct AppState {
     client: reqwest::Client,
-    upstream: Url,
-    upstream_api_key: Arc<str>,
+    baseline: UpstreamBinding,
+    candidate_a: Option<CandidateBinding>,
     keys: Arc<Vec<OperatorKey>>,
+    routes: RouteManager,
     store: Store,
     capture_tx: mpsc::Sender<CaptureJob>,
     capture_memory: Arc<Semaphore>,
     max_request_bytes: usize,
     max_response_bytes: usize,
+    candidate_header_timeout: Duration,
+    candidate_first_byte_timeout: Duration,
     counters: Arc<Counters>,
+}
+
+#[derive(Clone)]
+struct UpstreamBinding {
+    base_url: Url,
+    api_key: Arc<str>,
+}
+
+#[derive(Clone)]
+struct CandidateBinding {
+    upstream: UpstreamBinding,
+    artifact_sha256: Arc<str>,
+    binding_sha256: Arc<str>,
+}
+
+#[derive(Serialize)]
+struct CandidateIdentity<'a> {
+    base_url: &'a str,
+    artifact_sha256: &'a str,
 }
 
 #[derive(Clone)]
@@ -61,9 +85,10 @@ struct OperatorKey {
     digest: [u8; 32],
     scope_id: Uuid,
     profile: Profile,
+    route_revision: Option<u64>,
 }
 
-#[derive(Clone, Copy, Deserialize, Serialize)]
+#[derive(Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum Profile {
     Production,
@@ -75,6 +100,7 @@ enum Profile {
 struct KeyBinding {
     scope_id: Uuid,
     profile: Profile,
+    route_revision: Option<u64>,
 }
 
 #[derive(Default)]
@@ -105,6 +131,11 @@ struct CaptureJob {
     response_status: u16,
     response_headers: BTreeMap<String, String>,
     response: Vec<u8>,
+    route_id: Option<Uuid>,
+    route_target: &'static str,
+    candidate_artifact_sha256: Option<String>,
+    candidate_binding_sha256: Option<String>,
+    fallback_reason: Option<String>,
     ttft_ms: Option<u64>,
     total_ms: u64,
     _memory: Vec<OwnedSemaphorePermit>,
@@ -123,6 +154,11 @@ struct CaptureSeed {
     request: Bytes,
     response_status: u16,
     response_headers: BTreeMap<String, String>,
+    route_id: Option<Uuid>,
+    route_target: &'static str,
+    candidate_artifact_sha256: Option<String>,
+    candidate_binding_sha256: Option<String>,
+    fallback_reason: Option<String>,
 }
 
 struct ResponseRecorder {
@@ -144,6 +180,7 @@ struct ResponseRecorder {
 }
 
 struct UpstreamBody {
+    first: Option<Bytes>,
     inner: Pin<Box<dyn Stream<Item = reqwest::Result<Bytes>> + Send>>,
     recorder: ResponseRecorder,
 }
@@ -155,6 +192,10 @@ impl Stream for UpstreamBody {
         mut self: Pin<&mut Self>,
         context: &mut TaskContext<'_>,
     ) -> Poll<Option<Self::Item>> {
+        if let Some(bytes) = self.first.take() {
+            self.recorder.observe(&bytes);
+            return Poll::Ready(Some(Ok(bytes)));
+        }
         match self.inner.as_mut().poll_next(context) {
             Poll::Ready(Some(Ok(bytes))) => {
                 self.recorder.observe(&bytes);
@@ -291,6 +332,11 @@ impl ResponseRecorder {
             response_status: seed.response_status,
             response_headers: seed.response_headers,
             response: std::mem::take(&mut self.response),
+            route_id: seed.route_id,
+            route_target: seed.route_target,
+            candidate_artifact_sha256: seed.candidate_artifact_sha256,
+            candidate_binding_sha256: seed.candidate_binding_sha256,
+            fallback_reason: seed.fallback_reason,
             ttft_ms: self.first_byte.map(duration_ms),
             total_ms: duration_ms(self.started.elapsed()),
             _memory: std::mem::take(&mut self.memory),
@@ -344,8 +390,10 @@ struct ResponseCapture {
 
 #[derive(Serialize)]
 struct RouteCapture {
-    route_id: Option<String>,
+    route_id: Option<Uuid>,
     target: &'static str,
+    candidate_artifact_sha256: Option<String>,
+    candidate_binding_sha256: Option<String>,
     fallback_reason: Option<String>,
 }
 
@@ -361,8 +409,14 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| DEFAULT_LISTEN.to_owned())
         .parse()
         .context("MILK_LISTEN must be a socket address")?;
-    let upstream = parse_upstream(&required_env("MILK_UPSTREAM_BASE_URL")?)?;
-    let upstream_api_key: Arc<str> = required_env("MILK_UPSTREAM_API_KEY")?.into();
+    let baseline = UpstreamBinding {
+        base_url: parse_upstream(
+            "MILK_BASELINE_BASE_URL",
+            &required_env("MILK_BASELINE_BASE_URL")?,
+        )?,
+        api_key: required_env("MILK_BASELINE_API_KEY")?.into(),
+    };
+    let candidate_a = optional_candidate_binding()?;
     let keys = Arc::new(parse_keys(&required_env("MILK_KEYS_JSON")?)?);
     let max_request_bytes = env_usize(
         "MILK_MAX_REQUEST_BYTES",
@@ -387,6 +441,12 @@ async fn main() -> Result<()> {
     let counters = Arc::new(Counters::default());
     counters.writer_alive.store(true, Ordering::Release);
     let store = Store::from_environment().await?;
+    let routes = RouteManager::new(
+        store.clone(),
+        parse_verifying_key(&required_env("MILK_ROUTE_VERIFY_KEY")?)?,
+        Duration::from_secs(env_usize("MILK_ROUTE_POLL_SECONDS", 30, 1, 3600)? as u64),
+        route_revisions(&keys),
+    );
     let (capture_tx, capture_rx) = mpsc::channel(capture_queue);
     tokio::spawn(capture_writer(
         capture_rx,
@@ -401,14 +461,27 @@ async fn main() -> Result<()> {
         .build()?;
     let state = AppState {
         client,
-        upstream,
-        upstream_api_key,
+        baseline,
+        candidate_a,
         keys,
+        routes,
         store,
         capture_tx,
         capture_memory: Arc::new(Semaphore::new(capture_memory_bytes)),
         max_request_bytes,
         max_response_bytes,
+        candidate_header_timeout: Duration::from_secs(env_usize(
+            "MILK_CANDIDATE_HEADER_TIMEOUT_SECONDS",
+            30,
+            1,
+            300,
+        )? as u64),
+        candidate_first_byte_timeout: Duration::from_secs(env_usize(
+            "MILK_CANDIDATE_FIRST_BYTE_TIMEOUT_SECONDS",
+            120,
+            1,
+            600,
+        )? as u64),
         counters,
     };
     let app = Router::new()
@@ -554,42 +627,91 @@ async fn proxy(State(state): State<AppState>, request: Request) -> Response {
         .and_then(|value| value.get("stream").and_then(serde_json::Value::as_bool))
         .unwrap_or(false);
 
-    let upstream_url = match upstream_url(&state.upstream, &path_and_query) {
-        Ok(url) => url,
-        Err(error) => {
-            eprintln!("upstream URL rejected: {error:#}");
-            return gateway_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "invalid_upstream",
-                "The upstream is misconfigured.",
-            );
+    let route = state.routes.choose(
+        operator.scope_id,
+        operator.profile == Profile::Production,
+        exchange_id,
+    );
+    let mut route_target = route.target;
+    let mut fallback_reason = None;
+    let mut first_chunk = None;
+    let mut expected_response_bytes = None;
+    let upstream = if route.target == Target::CandidateA {
+        let candidate = state.candidate_a.as_ref().filter(|candidate| {
+            route.candidate_artifact_sha256.as_deref() == Some(candidate.artifact_sha256.as_ref())
+                && route.candidate_binding_sha256.as_deref()
+                    == Some(candidate.binding_sha256.as_ref())
+        });
+        let attempt = match (state.candidate_a.as_ref(), candidate) {
+            (None, _) => Err((
+                "candidate_unconfigured".to_owned(),
+                anyhow!("candidate binding is not configured"),
+            )),
+            (Some(_), None) => Err((
+                "candidate_identity_mismatch".to_owned(),
+                anyhow!("signed candidate artifact does not match the configured binding"),
+            )),
+            (_, Some(candidate)) => {
+                send_candidate(
+                    &state,
+                    candidate,
+                    &method,
+                    &path_and_query,
+                    &forwarded_headers,
+                    &request_body,
+                )
+                .await
+            }
+        };
+        match attempt {
+            Ok((response, chunk, length)) => {
+                first_chunk = Some(chunk);
+                expected_response_bytes = length;
+                response
+            }
+            Err((reason, error)) => {
+                eprintln!("candidate request failed for {exchange_id}: {error:#}");
+                fallback_reason = Some(reason);
+                route_target = Target::Baseline;
+                match send_upstream(
+                    &state,
+                    &state.baseline,
+                    &method,
+                    &path_and_query,
+                    &forwarded_headers,
+                    &request_body,
+                )
+                .await
+                {
+                    Ok(response) => response,
+                    Err(error) => return upstream_failure(&state, exchange_id, error),
+                }
+            }
         }
-    };
-    let upstream = match state
-        .client
-        .request(method.clone(), upstream_url)
-        .headers(forwarded_headers)
-        .bearer_auth(state.upstream_api_key.as_ref())
-        .body(request_body.clone())
-        .send()
+    } else {
+        match send_upstream(
+            &state,
+            &state.baseline,
+            &method,
+            &path_and_query,
+            &forwarded_headers,
+            &request_body,
+        )
         .await
-    {
-        Ok(response) => response,
-        Err(error) => {
-            state.counters.interrupted.fetch_add(1, Ordering::Relaxed);
-            eprintln!("upstream request failed for {exchange_id}: {error}");
-            return gateway_error(
-                StatusCode::BAD_GATEWAY,
-                "upstream_unavailable",
-                "The upstream request failed.",
-            );
+        {
+            Ok(response) => response,
+            Err(error) => return upstream_failure(&state, exchange_id, error),
         }
     };
 
     let status = upstream.status();
-    let expected_response_bytes = upstream
-        .content_length()
-        .and_then(|length| usize::try_from(length).ok());
+    let expected_response_bytes = if first_chunk.is_some() {
+        expected_response_bytes
+    } else {
+        upstream
+            .content_length()
+            .and_then(|length| usize::try_from(length).ok())
+    };
     let response_headers_capture = safe_response_headers(upstream.headers());
     let response_headers = match downstream_response_headers(upstream.headers()) {
         Ok(headers) => headers,
@@ -632,8 +754,15 @@ async fn proxy(State(state): State<AppState>, request: Request) -> Response {
         request,
         response_status: status.as_u16(),
         response_headers: response_headers_capture,
+        route_id: route.route_id,
+        route_target: route_target.as_str(),
+        candidate_artifact_sha256: route.candidate_artifact_sha256,
+        candidate_binding_sha256: route.candidate_binding_sha256,
+        fallback_reason,
     });
+    let first_byte = first_chunk.as_ref().map(|_| started.elapsed());
     let body = UpstreamBody {
+        first: first_chunk,
         inner: Box::pin(upstream.bytes_stream()),
         recorder: ResponseRecorder {
             seed,
@@ -643,7 +772,7 @@ async fn proxy(State(state): State<AppState>, request: Request) -> Response {
             capture_memory: Arc::clone(&state.capture_memory),
             counters: Arc::clone(&state.counters),
             started,
-            first_byte: None,
+            first_byte,
             max_response_bytes: state.max_response_bytes,
             exchange_id,
             expected_response_bytes,
@@ -713,9 +842,11 @@ fn encode_capture(job: CaptureJob) -> Result<Vec<u8>> {
             sha256: sha256_hex(&job.response),
         },
         route: RouteCapture {
-            route_id: None,
-            target: "baseline",
-            fallback_reason: None,
+            route_id: job.route_id,
+            target: job.route_target,
+            candidate_artifact_sha256: job.candidate_artifact_sha256,
+            candidate_binding_sha256: job.candidate_binding_sha256,
+            fallback_reason: job.fallback_reason,
         },
         timing: TimingCapture {
             ttft_ms: job.ttft_ms,
@@ -733,18 +864,44 @@ fn parse_keys(raw: &str) -> Result<Vec<OperatorKey>> {
     if configured.is_empty() || configured.len() > 4096 {
         bail!("MILK_KEYS_JSON must contain 1..=4096 keys");
     }
-    configured
+    let keys: Vec<OperatorKey> = configured
         .into_iter()
         .map(|(digest, binding)| {
             if binding.scope_id.is_nil() {
                 bail!("MILK_KEYS_JSON contains a nil scope_id");
             }
+            match (binding.profile, binding.route_revision) {
+                (Profile::Production, Some(1..)) | (Profile::Mechanics, None) => {}
+                (Profile::Production, _) => {
+                    bail!("each production scope needs a nonzero route_revision")
+                }
+                (Profile::Mechanics, Some(_)) => {
+                    bail!("mechanics scopes must omit route_revision")
+                }
+            }
             Ok(OperatorKey {
                 digest: decode_sha256(&digest)?,
                 scope_id: binding.scope_id,
                 profile: binding.profile,
+                route_revision: binding.route_revision,
             })
         })
+        .collect::<Result<_>>()?;
+    let mut scopes = BTreeMap::new();
+    for key in &keys {
+        if scopes
+            .insert(key.scope_id, (key.profile, key.route_revision))
+            .is_some_and(|binding| binding != (key.profile, key.route_revision))
+        {
+            bail!("MILK_KEYS_JSON assigns one scope conflicting bindings");
+        }
+    }
+    Ok(keys)
+}
+
+fn route_revisions(keys: &[OperatorKey]) -> HashMap<Uuid, u64> {
+    keys.iter()
+        .filter_map(|key| key.route_revision.map(|revision| (key.scope_id, revision)))
         .collect()
 }
 
@@ -766,6 +923,108 @@ fn authenticate<'a>(headers: &HeaderMap, keys: &'a [OperatorKey]) -> Option<&'a 
         }
     }
     matched
+}
+
+async fn send_upstream(
+    state: &AppState,
+    binding: &UpstreamBinding,
+    method: &axum::http::Method,
+    path_and_query: &str,
+    headers: &reqwest::header::HeaderMap,
+    body: &Bytes,
+) -> Result<reqwest::Response> {
+    let url = upstream_url(&binding.base_url, path_and_query)?;
+    state
+        .client
+        .request(method.clone(), url)
+        .headers(headers.clone())
+        .bearer_auth(binding.api_key.as_ref())
+        .body(body.clone())
+        .send()
+        .await
+        .context("upstream request failed")
+}
+
+async fn send_candidate(
+    state: &AppState,
+    candidate: &CandidateBinding,
+    method: &axum::http::Method,
+    path_and_query: &str,
+    headers: &reqwest::header::HeaderMap,
+    body: &Bytes,
+) -> std::result::Result<(reqwest::Response, Bytes, Option<usize>), (String, anyhow::Error)> {
+    let mut response = match tokio::time::timeout(
+        state.candidate_header_timeout,
+        send_upstream(
+            state,
+            &candidate.upstream,
+            method,
+            path_and_query,
+            headers,
+            body,
+        ),
+    )
+    .await
+    {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => return Err(("candidate_unavailable".to_owned(), error)),
+        Err(_) => {
+            return Err((
+                "candidate_header_timeout".to_owned(),
+                anyhow!("candidate response header timeout"),
+            ));
+        }
+    };
+    if retry_candidate_status(response.status()) {
+        let status = response.status().as_u16();
+        return Err((
+            format!("candidate_status_{status}"),
+            anyhow!("candidate returned retryable status {status}"),
+        ));
+    }
+    if let Err(error) = downstream_response_headers(response.headers()) {
+        return Err(("candidate_invalid_headers".to_owned(), error));
+    }
+    let content_length = response
+        .content_length()
+        .and_then(|length| usize::try_from(length).ok());
+    match tokio::time::timeout(
+        state.candidate_first_byte_timeout,
+        first_response_chunk(&mut response),
+    )
+    .await
+    {
+        Ok(Ok(chunk)) => Ok((response, chunk, content_length)),
+        Ok(Err(error)) => Err(("candidate_body_unavailable".to_owned(), error)),
+        Err(_) => Err((
+            "candidate_first_byte_timeout".to_owned(),
+            anyhow!("candidate first response byte timeout"),
+        )),
+    }
+}
+
+async fn first_response_chunk(response: &mut reqwest::Response) -> Result<Bytes> {
+    loop {
+        match response.chunk().await.context("candidate body failed")? {
+            Some(chunk) if !chunk.is_empty() => return Ok(chunk),
+            Some(_) => {}
+            None => bail!("candidate ended before its first response byte"),
+        }
+    }
+}
+
+fn retry_candidate_status(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+}
+
+fn upstream_failure(state: &AppState, exchange_id: Uuid, error: anyhow::Error) -> Response {
+    state.counters.interrupted.fetch_add(1, Ordering::Relaxed);
+    eprintln!("upstream request failed for {exchange_id}: {error:#}");
+    gateway_error(
+        StatusCode::BAD_GATEWAY,
+        "upstream_unavailable",
+        "The upstream request failed.",
+    )
 }
 
 fn upstream_request_headers(headers: &HeaderMap) -> Result<reqwest::header::HeaderMap> {
@@ -891,8 +1150,8 @@ fn safe_headers(headers: &HeaderMap, names: &[&str]) -> BTreeMap<String, String>
     selected
 }
 
-fn parse_upstream(raw: &str) -> Result<Url> {
-    let url = Url::parse(raw).context("MILK_UPSTREAM_BASE_URL is not a URL")?;
+fn parse_upstream(name: &str, raw: &str) -> Result<Url> {
+    let url = Url::parse(raw).with_context(|| format!("{name} is not a URL"))?;
     if !matches!(url.scheme(), "http" | "https")
         || url.host_str().is_none()
         || url.query().is_some()
@@ -900,11 +1159,37 @@ fn parse_upstream(raw: &str) -> Result<Url> {
         || !url.username().is_empty()
         || url.password().is_some()
     {
-        bail!(
-            "MILK_UPSTREAM_BASE_URL must be an HTTP(S) base URL without credentials, query, or fragment"
-        );
+        bail!("{name} must be an HTTP(S) base URL without credentials, query, or fragment");
     }
     Ok(url)
+}
+
+fn optional_candidate_binding() -> Result<Option<CandidateBinding>> {
+    let base_url = optional_env("MILK_CANDIDATE_A_BASE_URL")?;
+    let api_key = optional_env("MILK_CANDIDATE_A_API_KEY")?;
+    let artifact_sha256 = optional_env("MILK_CANDIDATE_A_ARTIFACT_SHA256")?;
+    match (base_url, api_key, artifact_sha256) {
+        (None, None, None) => Ok(None),
+        (Some(base_url), Some(api_key), Some(artifact_sha256)) => {
+            require_sha256("MILK_CANDIDATE_A_ARTIFACT_SHA256", &artifact_sha256)?;
+            let binding_sha256 = sha256_hex(&serde_json::to_vec(&CandidateIdentity {
+                base_url: &base_url,
+                artifact_sha256: &artifact_sha256,
+            })?);
+            Ok(Some(CandidateBinding {
+                upstream: UpstreamBinding {
+                    base_url: parse_upstream("MILK_CANDIDATE_A_BASE_URL", &base_url)?,
+                    api_key: api_key.into(),
+                },
+                artifact_sha256: artifact_sha256.into(),
+                binding_sha256: binding_sha256.into(),
+            }))
+        }
+        _ => bail!(
+            "MILK_CANDIDATE_A_BASE_URL, MILK_CANDIDATE_A_API_KEY, and \
+             MILK_CANDIDATE_A_ARTIFACT_SHA256 must be set together"
+        ),
+    }
 }
 
 fn upstream_url(base: &Url, path_and_query: &str) -> Result<Url> {
@@ -922,6 +1207,26 @@ fn required_env(name: &str) -> Result<String> {
         bail!("{name} must not be empty");
     }
     Ok(value)
+}
+
+fn optional_env(name: &str) -> Result<Option<String>> {
+    match env::var(name) {
+        Ok(value) if !value.is_empty() => Ok(Some(value)),
+        Ok(_) => bail!("{name} must not be empty"),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("read {name}")),
+    }
+}
+
+fn require_sha256(name: &str, value: &str) -> Result<()> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        bail!("{name} must be 64 lowercase hexadecimal characters");
+    }
+    Ok(())
 }
 
 fn env_usize(name: &str, default: usize, minimum: usize, maximum: usize) -> Result<usize> {
