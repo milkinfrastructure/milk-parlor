@@ -6,6 +6,17 @@
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": false,
   "preview_urls": false,
+  "secrets": {
+    "required": [
+      "MILK_KEYS_JSON",
+      "MILK_UPSTREAM_BASE_URL",
+      "MILK_UPSTREAM_API_KEY",
+      "MILK_STORE_ENDPOINT",
+      "MILK_STORE_BUCKET",
+      "MILK_STORE_ACCESS_KEY_ID",
+      "MILK_STORE_SECRET_ACCESS_KEY"
+    ]
+  },
   "routes": [
     {
       "pattern": "parlor.milkinfrastructure.com",
