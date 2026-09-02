@@ -47,6 +47,6 @@ export class MilkParlor extends Container {
 
 export default {
   fetch(request) {
-    return getContainer(env.MILK_PARLOR, "parlor").fetch(request);
+    return getContainer(env.MILK_PARLOR, "parlor-545ef3a0").fetch(request);
   },
 };
