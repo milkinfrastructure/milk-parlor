@@ -7,6 +7,7 @@ Create a temporary JSON file outside the repository containing every required Wo
 ```json
 {
   "MILK_KEYS_JSON": "<operator-key-map; each production binding includes its exact route_revision>",
+  "MILK_PARLOR_INSTANCE": "<new parlor-generation for each credential or route cutover>",
   "MILK_BASELINE_BASE_URL": "<known-good-openai-compatible-origin>",
   "MILK_BASELINE_API_KEY": "<baseline-key>",
   "MILK_ROUTE_VERIFY_KEY": "<standard-base64-ed25519-public-key>",

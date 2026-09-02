@@ -9,6 +9,7 @@
   "secrets": {
     "required": [
       "MILK_KEYS_JSON",
+      "MILK_PARLOR_INSTANCE",
       "MILK_BASELINE_BASE_URL",
       "MILK_BASELINE_API_KEY",
       "MILK_ROUTE_VERIFY_KEY",

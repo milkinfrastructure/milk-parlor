@@ -47,6 +47,10 @@ export class MilkParlor extends Container {
 
 export default {
   fetch(request) {
-    return getContainer(env.MILK_PARLOR, "parlor-545ef3a0").fetch(request);
+    const instance = env.MILK_PARLOR_INSTANCE;
+    if (typeof instance !== "string" || !/^parlor-[a-z0-9-]{1,48}$/.test(instance)) {
+      throw new Error("MILK_PARLOR_INSTANCE is invalid");
+    }
+    return getContainer(env.MILK_PARLOR, instance).fetch(request);
   },
 };
