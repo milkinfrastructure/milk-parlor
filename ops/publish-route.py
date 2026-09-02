@@ -55,12 +55,24 @@ def now() -> str:
 
 
 def sign(key: Path, message: bytes) -> str:
-    result = subprocess.run(
-        ["openssl", "pkeyutl", "-sign", "-rawin", "-inkey", str(key)],
-        input=message,
-        stdout=subprocess.PIPE,
-        check=True,
-    )
+    # macOS OpenSSL rejects Ed25519 one-shot signing from an unsized stdin.
+    with tempfile.NamedTemporaryFile() as source:
+        source.write(message)
+        source.flush()
+        result = subprocess.run(
+            [
+                "openssl",
+                "pkeyutl",
+                "-sign",
+                "-rawin",
+                "-inkey",
+                str(key),
+                "-in",
+                source.name,
+            ],
+            stdout=subprocess.PIPE,
+            check=True,
+        )
     if len(result.stdout) != 64:
         fail("OpenSSL returned an invalid Ed25519 signature")
     return base64.b64encode(result.stdout).decode()
