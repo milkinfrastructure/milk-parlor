@@ -29,7 +29,7 @@
       "class_name": "MilkParlor",
       "image": "registry.cloudflare.com/d8a5175f959d3dbd4084db9fcab1c44c/milk-parlor@sha256:545ef3a0ccef16b20e0fe689d59fd7dff06651fcb6d00dbd1ecd51be53bde728",
       "instance_type": "lite",
-      "max_instances": 1
+      "max_instances": 2
     }
   ],
   "durable_objects": {
