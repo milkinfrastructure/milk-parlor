@@ -40,9 +40,11 @@ const response = await client.responses.create({model: "your-model", input: "Rep
 console.log(response.output_text);
 ```
 
-Milk tunnels `POST /v1/responses` and `POST /v1/chat/completions`, including
-streaming bodies, without protocol translation. It does not claim compatibility
-with unrelated OpenAI endpoints.
+Milk tunnels OpenAI's
+[Responses](https://developers.openai.com/api/reference/cli/resources/responses/methods/create)
+and [Chat Completions](https://developers.openai.com/api/reference/cli/resources/chat/subresources/completions)
+create routes, including streaming bodies, without protocol translation. It
+does not claim compatibility with unrelated OpenAI endpoints.
 
 ## Run
 
