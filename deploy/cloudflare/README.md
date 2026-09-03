@@ -1,6 +1,14 @@
 # Cloudflare deployment
 
-The Worker sends every request to one `lite` container at `parlor.milkinfrastructure.com`. The image workflow publishes the cached Linux AMD64 scratch image to GHCR. On `main`, it copies that release into Cloudflare Registry with pinned Wrangler. Configure the single GitHub Actions secret `CLOUDFLARE_API_TOKEN`; it must permit container image writes for account `d8a5175f959d3dbd4084db9fcab1c44c`.
+The Worker sends requests to `lite` containers at `parlor.milkinfrastructure.com`. Build the Linux AMD64 scratch image locally, push it to Cloudflare Registry, then pin the returned digest in `wrangler.jsonc`:
+
+```bash
+npm ci
+docker buildx build --platform linux/amd64 --tag milk-parlor:main --load ../..
+npx wrangler containers push milk-parlor:main
+```
+
+Run these commands from `deploy/cloudflare`. The Cloudflare session must permit container image writes for account `d8a5175f959d3dbd4084db9fcab1c44c`. Milk Parlor does not use GitHub Actions.
 
 Create a temporary JSON file outside the repository containing every required Worker secret:
 
@@ -28,7 +36,6 @@ Validate without uploading, then atomically upload the Worker and its secrets as
 secrets_file=/absolute/path/to/milk-parlor.secrets.json
 chmod 600 "$secrets_file"
 trap 'rm -f "$secrets_file"' EXIT
-npm ci
 npm run check
 npm run deploy -- --secrets-file "$secrets_file" --strict
 ```

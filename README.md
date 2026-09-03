@@ -115,13 +115,15 @@ openssl pkey -in /secure/milk-route.pem -pubout -outform DER \
 With the S3 variables above exported, publish a higher revision:
 
 ```bash
+export MILK_ROUTE_EXPIRES_AT='<future RFC3339 UTC timestamp>'
+
 ./ops/publish-route.py \
   --signing-key /secure/milk-route.pem \
   --scope-id 11111111-1111-4111-8111-111111111111 \
   --revision 1 --candidate-bps 100 \
   --candidate-chat-base-url https://candidate.example.com \
   --candidate-artifact-sha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
-  --expires-at 2026-09-02T00:00:00Z
+  --expires-at "$MILK_ROUTE_EXPIRES_AT"
 ```
 
 The command creates a new immutable route and advances `r/current.json` only if
