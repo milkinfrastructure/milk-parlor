@@ -1,6 +1,6 @@
 # Milk Parlor
 
-Milk Parlor is a small Rust server between the OpenAI SDK and model providers.
+Milk Parlor is a small OpenAI-compatible Rust gateway between applications and model providers.
 It checks an operator-issued key, forwards Chat Completions and Responses
 requests without translating them, and streams the answer back. After a complete
 answer, it saves the request and response to object storage in the background.
@@ -8,6 +8,41 @@ If that write fails, the customer request still succeeds.
 
 Milk Parlor needs no database, external queue service, model weights, or GPU.
 Milk Man reads the saved conversations and does the heavier work.
+
+## Connect an application
+
+There is no replacement Milk SDK. Keep the official OpenAI package and change
+only its base URL and key:
+
+```bash
+pip install openai # or: npm install openai
+export OPENAI_BASE_URL=https://parlor.milkinfrastructure.com/v1
+export OPENAI_API_KEY='your operator-issued Milk key'
+```
+
+Existing Python code remains unchanged:
+
+```python
+from openai import OpenAI
+
+client = OpenAI()
+response = client.responses.create(model="your-model", input="Reply with milk.")
+print(response.output_text)
+```
+
+Existing JavaScript code remains unchanged:
+
+```javascript
+import OpenAI from "openai";
+
+const client = new OpenAI();
+const response = await client.responses.create({model: "your-model", input: "Reply with milk."});
+console.log(response.output_text);
+```
+
+Milk tunnels `POST /v1/responses` and `POST /v1/chat/completions`, including
+streaming bodies, without protocol translation. It does not claim compatibility
+with unrelated OpenAI endpoints.
 
 ## Run
 
@@ -27,7 +62,7 @@ export MILK_KEYS_JSON="{\"$DIGEST\":{\"scope_id\":\"11111111-1111-4111-8111-1111
 cargo run
 ```
 
-Use the key with the official Python SDK:
+Use the key with the official Python SDK against a local Parlor:
 
 ```python
 import os
