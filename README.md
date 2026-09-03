@@ -1,26 +1,31 @@
 # Milk Parlor
 
-Milk Parlor is a small OpenAI-compatible Rust gateway between applications and model providers.
-It checks an operator-issued key, forwards Chat Completions and Responses
-requests without translating them, and streams the answer back. After a complete
-answer, it saves the request and response to object storage in the background.
-If that write fails, the customer request still succeeds.
+[Read the Milk documentation](https://milkinfrastructure.com/docs/).
 
-Milk Parlor needs no database, external queue service, model weights, or GPU.
-Milk Man reads the saved conversations and does the heavier work.
+Milk Parlor is a small Rust gateway between applications and model providers.
+It accepts an operator-issued Milk key, forwards supported OpenAI requests
+without changing their bodies, and streams the provider response back.
 
-## Connect an application
+After a response completes, Parlor attempts to store selected request and
+response pairs in folder-like object storage such as Cloudflare R2 or Amazon
+S3. Capture runs in the background: a capture
+failure does not fail the customer request. Parlor needs no database, external
+queue, model weights, or GPU. Milk Man reads the captured exchanges and performs
+the heavier work.
 
-There is no replacement Milk SDK. Keep the official OpenAI package and change
-only its base URL and key:
+## Use the hosted gateway
+
+Keep the official OpenAI SDK. Change only its base URL and API key:
 
 ```bash
-pip install openai # or: npm install openai
-export OPENAI_BASE_URL=https://parlor.milkinfrastructure.com/v1
-export OPENAI_API_KEY='your operator-issued Milk key'
+pip install openai                 # Python
+# or: npm install openai           # JavaScript
+
+export OPENAI_BASE_URL='https://parlor.milkinfrastructure.com/v1'
+export OPENAI_API_KEY='your-operator-issued-milk-key'
 ```
 
-Existing Python code remains unchanged:
+Python:
 
 ```python
 from openai import OpenAI
@@ -30,144 +35,151 @@ response = client.responses.create(model="your-model", input="Reply with milk.")
 print(response.output_text)
 ```
 
-Existing JavaScript code remains unchanged:
+JavaScript:
 
 ```javascript
 import OpenAI from "openai";
 
 const client = new OpenAI();
-const response = await client.responses.create({model: "your-model", input: "Reply with milk."});
+const response = await client.responses.create({
+  model: "your-model",
+  input: "Reply with milk.",
+});
 console.log(response.output_text);
 ```
 
-Milk tunnels OpenAI's
-[Responses](https://developers.openai.com/api/reference/cli/resources/responses/methods/create)
-and [Chat Completions](https://developers.openai.com/api/reference/cli/resources/chat/subresources/completions)
-create routes, including streaming bodies, without protocol translation. It
-does not claim compatibility with unrelated OpenAI endpoints.
+## Routes
 
-## Run
+| Method | Path | Authentication | Purpose |
+| --- | --- | --- | --- |
+| `GET` | `/` | None | Status page |
+| `GET` | `/status` | None | Same status page |
+| `GET` | `/healthz` | None | Gateway configuration and capture counters |
+| `GET` | `/api/status` | Milk bearer key | JSON status for the key's scope |
+| `POST` | `/v1/chat/completions` | Milk bearer key | Chat Completions create |
+| `POST` | `/v1/responses` | Milk bearer key | Responses create |
+
+`/healthz` reports gateway process state; it does not probe the provider or
+object store. Parlor supports streaming on both create routes. It does not
+claim compatibility with other OpenAI endpoints.
+
+## Run locally
+
+Use Rust 1.93, OpenSSL, and provider credentials for both supported APIs. The
+two APIs may use different providers. Provider base URLs must stop before
+`/v1`.
 
 ```bash
-export MILK_BASELINE_CHAT_BASE_URL=https://api.openai.com
-export MILK_BASELINE_CHAT_API_KEY=...
-export MILK_BASELINE_RESPONSES_BASE_URL=https://api.openai.com
-export MILK_BASELINE_RESPONSES_API_KEY=...
-export MILK_ROUTE_VERIFY_KEY=... # standard base64 Ed25519 public key
+export MILK_BASELINE_CHAT_BASE_URL='https://api.openai.com'
+export MILK_BASELINE_CHAT_API_KEY='replace-with-provider-key'
+export MILK_BASELINE_RESPONSES_BASE_URL='https://api.openai.com'
+export MILK_BASELINE_RESPONSES_API_KEY='replace-with-provider-key'
+
+# Parlor requires a route public key at startup, including for a local test.
+umask 077
+route_private_key="$(mktemp)"
+trap 'rm -f "$route_private_key"' EXIT
+openssl genpkey -algorithm ED25519 -out "$route_private_key"
+export MILK_ROUTE_VERIFY_KEY="$(
+  openssl pkey -in "$route_private_key" -pubout -outform DER \
+    | tail -c 32 | base64 | tr -d '\n'
+)"
+
 export MILK_STORE_KIND=local
 export MILK_STORE_ROOT="$PWD/data"
 
-export MILK_API_KEY='replace-with-an-operator-key'
-DIGEST="$(printf %s "$MILK_API_KEY" | shasum -a 256 | cut -d' ' -f1)"
+# This plain-text key is for local development only. Parlor stores only its digest.
+milk_key='local-milk-operator-key-change-me'
+DIGEST="$(printf %s "$milk_key" | openssl dgst -sha256 -r | awk '{print $1}')"
 export MILK_KEYS_JSON="{\"$DIGEST\":{\"scope_id\":\"11111111-1111-4111-8111-111111111111\",\"profile\":\"mechanics\"}}"
 
-cargo run
+cargo run --locked
 ```
 
-Use the key with the official Python SDK against a local Parlor:
+In another terminal, use the same local key with the official SDK:
 
 ```python
-import os
 from openai import OpenAI
 
 client = OpenAI(
     base_url="http://127.0.0.1:8080/v1",
-    api_key=os.environ["MILK_API_KEY"],
+    api_key="local-milk-operator-key-change-me",
 )
-
-response = client.responses.create(
-    model="gpt-5.6-luna",
-    input="Reply with milk.",
-)
+response = client.responses.create(model="your-model", input="Reply with milk.")
 print(response.output_text)
 ```
 
-Each complete conversation is compressed and stored at:
+Captured complete exchanges are stored as immutable compressed objects at:
 
 ```text
 milk/v2/scopes/<scope_uuid>/c/<exchange_uuidv7>.json.zst
 ```
 
-`GET /healthz` is public. `GET /status` shows a small status page. That page uses
-the operator key to read `milk/v2/scopes/<scope_uuid>/status/current.json`.
-
 ## Configuration
 
-Required:
+Always required:
 
-- `MILK_KEYS_JSON`: maps each key's lowercase SHA-256 digest to its customer
-  `scope_id` and `profile` (`production` or `mechanics`). A production entry also
-  names the exact nonzero `route_revision` it may use.
-- `MILK_BASELINE_CHAT_BASE_URL` and `MILK_BASELINE_CHAT_API_KEY`: the default
-  Chat Completions provider.
-- `MILK_BASELINE_RESPONSES_BASE_URL` and `MILK_BASELINE_RESPONSES_API_KEY`: the
-  default Responses provider. The two APIs may use different providers and
-  keys. Use provider base URLs before `/v1`.
-- `MILK_ROUTE_VERIFY_KEY`: standard-base64 encoding of the 32-byte Ed25519 route verification key.
+| Variable | Meaning |
+| --- | --- |
+| `MILK_KEYS_JSON` | Map of lowercase SHA-256 key digests to `scope_id`, `profile`, and, for production only, a nonzero `route_revision`. Mechanics entries must omit `route_revision`. |
+| `MILK_BASELINE_CHAT_BASE_URL`, `MILK_BASELINE_CHAT_API_KEY` | Default Chat Completions provider. |
+| `MILK_BASELINE_RESPONSES_BASE_URL`, `MILK_BASELINE_RESPONSES_API_KEY` | Default Responses provider. |
+| `MILK_ROUTE_VERIFY_KEY` | Standard-base64 encoding of the 32-byte Ed25519 public key. |
 
-Optional:
+Storage:
 
-- `MILK_LISTEN` (`0.0.0.0:8080`)
-- `MILK_STORE_KIND` (`local`; set `s3` for S3-compatible storage)
-- `MILK_STORE_ROOT` (`./data`)
-- `MILK_MAX_REQUEST_BYTES` (8 MiB)
-- `MILK_MAX_RESPONSE_BYTES` (16 MiB)
-- `MILK_CAPTURE_MEMORY_BYTES` (64 MiB across active and queued captures)
-- `MILK_CAPTURE_QUEUE` (64)
-- `MILK_ROUTE_POLL_SECONDS` (30)
-- `MILK_CANDIDATE_A_ARTIFACT_SHA256` plus a complete candidate pair for Chat
-  Completions, Responses, or both. Each pair is its `*_BASE_URL` and
-  `*_API_KEY`. A route can use only the APIs that candidate implements.
-- `MILK_CANDIDATE_HEADER_TIMEOUT_SECONDS` (30)
-- `MILK_CANDIDATE_FIRST_BYTE_TIMEOUT_SECONDS` (120)
+| Variable | Default or rule |
+| --- | --- |
+| `MILK_STORE_KIND` | `local`; the other accepted value is `s3`. |
+| `MILK_STORE_ROOT` | `./data`; used only for local storage. |
+| `MILK_STORE_ENDPOINT`, `MILK_STORE_REGION`, `MILK_STORE_BUCKET` | Required for `s3`. |
+| `MILK_STORE_ACCESS_KEY_ID`, `MILK_STORE_SECRET_ACCESS_KEY` | Required for `s3`. |
+| `MILK_STORE_SESSION_TOKEN` | Optional for `s3`. |
+| `MILK_STORE_PATH_STYLE` | `true`. |
+| `MILK_STORE_TIMEOUT_SECONDS` | `30`; accepted range is 1–120. |
 
-For `MILK_STORE_KIND=s3`, set `MILK_STORE_ENDPOINT`, `MILK_STORE_REGION`,
-`MILK_STORE_BUCKET`, `MILK_STORE_ACCESS_KEY_ID`, and
-`MILK_STORE_SECRET_ACCESS_KEY`. `MILK_STORE_SESSION_TOKEN` is optional.
-`MILK_STORE_PATH_STYLE` defaults to `true` and `MILK_STORE_TIMEOUT_SECONDS` to
-`30`. A captured conversation is created once and never overwritten.
+Optional candidate routing:
+
+- Set `MILK_CANDIDATE_A_ARTIFACT_SHA256` to 64 lowercase hexadecimal
+  characters.
+- Set at least one complete URL/key pair:
+  `MILK_CANDIDATE_A_CHAT_BASE_URL` with `MILK_CANDIDATE_A_CHAT_API_KEY`, or
+  `MILK_CANDIDATE_A_RESPONSES_BASE_URL` with
+  `MILK_CANDIDATE_A_RESPONSES_API_KEY`.
+- Candidate base URLs also stop before `/v1`.
+
+Optional runtime settings:
+
+| Variable | Default | Accepted range |
+| --- | ---: | ---: |
+| `MILK_LISTEN` | `0.0.0.0:8080` | Socket address |
+| `MILK_MAX_REQUEST_BYTES` | 8 MiB | 1 byte–64 MiB |
+| `MILK_MAX_RESPONSE_BYTES` | 16 MiB | 1 byte–256 MiB |
+| `MILK_CAPTURE_MEMORY_BYTES` | 64 MiB | At least the smaller of the request limit and 64 MiB; at most 4,294,967,295 bytes |
+| `MILK_CAPTURE_QUEUE` | `64` | 1–4,096 |
+| `MILK_ROUTE_POLL_SECONDS` | `30` | 1–3,600 |
+| `MILK_CANDIDATE_HEADER_TIMEOUT_SECONDS` | `30` | 1–300 |
+| `MILK_CANDIDATE_FIRST_BYTE_TIMEOUT_SECONDS` | `120` | 1–600 |
+
+The `*_BYTES` variables are integer byte counts.
 
 ## Signed routes
 
-Only production traffic uses signed routes; mechanics traffic always uses the
-default provider. Milk Parlor checks routes in the background, so a request
-never waits for object storage. Missing, invalid, or expired routes use the
-default provider.
+Only production profiles use signed routes; mechanics profiles always use the
+default provider. Missing, invalid, or expired routes also use the default.
 
-A route fixes the candidate model, eligible API, and traffic percentage. Each
-exchange gets a deterministic assignment. If a candidate cannot connect, times
-out, returns an error, or fails before its first response byte, Milk Parlor
-retries that request with the matching default provider. It never moves a
-request after streaming has begun.
-
-Route signing is an operator action, not a Milk Man tool. Generate a key and derive the deployment value without exposing the private key:
-
-```bash
-umask 077
-openssl genpkey -algorithm ED25519 -out /secure/milk-route.pem
-openssl pkey -in /secure/milk-route.pem -pubout -outform DER \
-  | tail -c 32 | base64 | tr -d '\n'
-```
-
-With the S3 variables above exported, publish a higher revision:
-
-```bash
-export MILK_ROUTE_EXPIRES_AT='<future RFC3339 UTC timestamp>'
-
-./ops/publish-route.py \
-  --signing-key /secure/milk-route.pem \
-  --scope-id 11111111-1111-4111-8111-111111111111 \
-  --revision 1 --candidate-bps 100 \
-  --candidate-chat-base-url https://candidate.example.com \
-  --candidate-artifact-sha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
-  --expires-at "$MILK_ROUTE_EXPIRES_AT"
-```
-
-The command creates a new immutable route and advances `r/current.json` only if
-it has not changed underneath the operator. Activate it by redeploying each
-production key entry with that exact `route_revision`. Roll back with a higher
-revision that selects the prior model. Stop candidate traffic with a higher
-revision and `--candidate-bps 0`.
+`ops/publish-route.py` requires Python 3, OpenSSL, the AWS CLI, and the S3
+storage variables above. `--candidate-bps` is a basis-point value from 0 to
+10,000: `100` means 1% and `10000` means 100%. A zero route must omit all
+candidate URL and artifact arguments. After publishing a higher revision,
+redeploy the production key entry with that exact `route_revision`.
 
 Keep the private signing key outside Milk Parlor, Milk Man, CI, and HTTP
 requests.
+
+## Deploy
+
+For the pinned Cloudflare Worker and container workflow, see
+[deploy/cloudflare/README.md](deploy/cloudflare/README.md).
+
+Report security issues privately as described in [SECURITY.md](SECURITY.md).
