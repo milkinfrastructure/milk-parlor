@@ -115,6 +115,10 @@ Captured complete exchanges are stored as immutable compressed objects at:
 milk/v2/scopes/<scope_uuid>/c/<exchange_uuidv7>.json.zst
 ```
 
+Clients may send one nonzero UUID in `X-Milk-Trajectory-Id`. Parlor removes the
+header before forwarding and saves it as optional top-level `trajectory_id`
+metadata so related model calls can be read as one ordered task.
+
 ## Configuration
 
 Always required:

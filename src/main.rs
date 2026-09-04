@@ -150,6 +150,7 @@ struct Counters {
 struct CaptureJob {
     scope_id: Uuid,
     profile: Profile,
+    trajectory_id: Option<Uuid>,
     exchange_id: Uuid,
     started_at: String,
     completed_at: String,
@@ -175,6 +176,7 @@ struct CaptureJob {
 struct CaptureSeed {
     scope_id: Uuid,
     profile: Profile,
+    trajectory_id: Option<Uuid>,
     exchange_id: Uuid,
     started_at: String,
     endpoint: &'static str,
@@ -351,6 +353,7 @@ impl ResponseRecorder {
         let job = CaptureJob {
             scope_id: seed.scope_id,
             profile: seed.profile,
+            trajectory_id: seed.trajectory_id,
             exchange_id: seed.exchange_id,
             started_at: seed.started_at,
             completed_at: utc_now(),
@@ -388,6 +391,8 @@ struct ExchangeEnvelope {
     schema_version: &'static str,
     scope_id: Uuid,
     profile: Profile,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trajectory_id: Option<Uuid>,
     exchange_id: Uuid,
     started_at: String,
     completed_at: String,
@@ -647,6 +652,17 @@ async fn proxy(State(state): State<AppState>, request: Request) -> Response {
         .path_and_query()
         .map_or_else(|| request.uri().path().to_owned(), ToString::to_string);
     let request_path = request.uri().path().to_owned();
+    let trajectory_id = match trajectory_id(request.headers()) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("request header rejection: {error:#}");
+            return gateway_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_headers",
+                "The request headers are invalid.",
+            );
+        }
+    };
     let request_headers = safe_request_headers(request.headers());
     let forwarded_headers = match upstream_request_headers(request.headers()) {
         Ok(headers) => headers,
@@ -797,6 +813,7 @@ async fn proxy(State(state): State<AppState>, request: Request) -> Response {
     let seed = capture_request.map(|request| CaptureSeed {
         scope_id: operator.scope_id,
         profile: operator.profile,
+        trajectory_id,
         exchange_id,
         started_at,
         endpoint,
@@ -874,6 +891,7 @@ fn encode_capture(job: CaptureJob) -> Result<Vec<u8>> {
         schema_version: EXCHANGE_SCHEMA,
         scope_id: job.scope_id,
         profile: job.profile,
+        trajectory_id: job.trajectory_id,
         exchange_id: job.exchange_id,
         started_at: job.started_at,
         completed_at: job.completed_at,
@@ -976,6 +994,24 @@ fn authenticate<'a>(headers: &HeaderMap, keys: &'a [OperatorKey]) -> Option<&'a 
         }
     }
     matched
+}
+
+fn trajectory_id(headers: &HeaderMap) -> Result<Option<Uuid>> {
+    let mut values = headers.get_all("x-milk-trajectory-id").iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        bail!("x-milk-trajectory-id must appear once");
+    }
+    let value = value
+        .to_str()
+        .context("x-milk-trajectory-id must be ASCII")?;
+    let value = Uuid::parse_str(value).context("x-milk-trajectory-id must be a UUID")?;
+    if value.is_nil() {
+        bail!("x-milk-trajectory-id must be nonzero");
+    }
+    Ok(Some(value))
 }
 
 async fn send_upstream(
