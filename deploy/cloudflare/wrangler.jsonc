@@ -30,7 +30,7 @@
   "containers": [
     {
       "class_name": "MilkParlor",
-      "image": "registry.cloudflare.com/d8a5175f959d3dbd4084db9fcab1c44c/milk-parlor@sha256:7311ba8e6021f9c24277ad35ee5e6aeddc78e944e859ca4df0e933518a0e335e",
+      "image": "registry.cloudflare.com/d8a5175f959d3dbd4084db9fcab1c44c/milk-parlor@sha256:57dd4e003466858294995f8351e24e1436b8a4df65f27cb0b6565ca4d4fc8024",
       "instance_type": "lite",
       "max_instances": 10
     }
