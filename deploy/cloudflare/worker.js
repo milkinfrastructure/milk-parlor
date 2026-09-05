@@ -2,6 +2,19 @@ import { Container, getContainer } from "@cloudflare/containers";
 import { env } from "cloudflare:workers";
 
 function containerEnvironment(bindings) {
+  const scoped = {};
+  if (bindings.MILK_MECHANICS_UPSTREAMS_JSON !== undefined) {
+    scoped.MILK_MECHANICS_UPSTREAMS_JSON = bindings.MILK_MECHANICS_UPSTREAMS_JSON;
+    for (const protocols of Object.values(JSON.parse(scoped.MILK_MECHANICS_UPSTREAMS_JSON))) {
+      for (const upstream of Object.values(protocols)) {
+        const name = upstream.api_key_env;
+        if (typeof name !== "string" || !/^[A-Z][A-Z0-9_]{0,127}$/.test(name) || !bindings[name]) {
+          throw new Error("mechanics upstream requires its named API-key binding");
+        }
+        scoped[name] = bindings[name];
+      }
+    }
+  }
   const candidateChat = [
     bindings.MILK_CANDIDATE_A_CHAT_BASE_URL,
     bindings.MILK_CANDIDATE_A_CHAT_API_KEY,
@@ -23,6 +36,7 @@ function containerEnvironment(bindings) {
     throw new Error("candidate protocol bindings and artifact digest must be set together");
   }
   return {
+    ...scoped,
     MILK_LISTEN: "0.0.0.0:8080",
     MILK_STORE_KIND: "s3",
     MILK_STORE_REGION: "auto",

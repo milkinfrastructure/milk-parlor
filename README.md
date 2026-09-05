@@ -138,6 +138,19 @@ Always required:
 | `MILK_BASELINE_RESPONSES_BASE_URL`, `MILK_BASELINE_RESPONSES_API_KEY` | Default Responses provider. |
 | `MILK_ROUTE_VERIFY_KEY` | Standard-base64 encoding of the 32-byte Ed25519 public key. |
 
+To give one mechanics scope its own model endpoint, set
+`MILK_MECHANICS_UPSTREAMS_JSON`. Other scopes and protocols keep their defaults;
+production scopes still use signed routes. For example:
+
+```json
+{"<scope UUID>":{"chat_completions":{"base_url":"https://your-model.example.com","api_key_env":"MILK_OWN_MODEL_API_KEY"}}}
+```
+
+Set the named key separately in the process environment (a Worker secret on
+Cloudflare). The URL stops before `/v1`. Restart Parlor after changing these
+settings. Requests, responses and trajectory IDs use the existing capture path.
+This selects a baseline for experiments; it does not qualify a production route.
+
 Storage:
 
 | Variable | Default or rule |

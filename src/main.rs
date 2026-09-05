@@ -48,6 +48,7 @@ const DEFAULT_CAPTURE_QUEUE: usize = 64;
 struct AppState {
     client: reqwest::Client,
     baseline: ProtocolBindings,
+    mechanics_baselines: Arc<BTreeMap<(Uuid, Protocol), UpstreamBinding>>,
     candidate_a: Option<CandidateBinding>,
     keys: Arc<Vec<OperatorKey>>,
     routes: RouteManager,
@@ -65,6 +66,13 @@ struct AppState {
 struct UpstreamBinding {
     base_url: Url,
     api_key: Arc<str>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScopedUpstream {
+    base_url: String,
+    api_key_env: String,
 }
 
 #[derive(Clone)]
@@ -457,6 +465,7 @@ async fn main() -> Result<()> {
     };
     let candidate_a = optional_candidate_binding()?;
     let keys = Arc::new(parse_keys(&required_env("MILK_KEYS_JSON")?)?);
+    let mechanics_baselines = Arc::new(mechanics_baselines(&keys)?);
     let max_request_bytes = env_usize(
         "MILK_MAX_REQUEST_BYTES",
         DEFAULT_MAX_REQUEST_BYTES,
@@ -501,6 +510,7 @@ async fn main() -> Result<()> {
     let state = AppState {
         client,
         baseline,
+        mechanics_baselines,
         candidate_a,
         keys,
         routes,
@@ -646,6 +656,11 @@ async fn proxy(State(state): State<AppState>, request: Request) -> Response {
         }
     };
     let endpoint = protocol.as_str();
+    let baseline = state
+        .mechanics_baselines
+        .get(&(operator.scope_id, protocol))
+        .filter(|_| operator.profile == Profile::Mechanics)
+        .unwrap_or_else(|| state.baseline.get(protocol));
     let method = request.method().clone();
     let path_and_query = request
         .uri()
@@ -744,7 +759,7 @@ async fn proxy(State(state): State<AppState>, request: Request) -> Response {
                 route_target = Target::Baseline;
                 match send_upstream(
                     &state,
-                    state.baseline.get(protocol),
+                    baseline,
                     &method,
                     &path_and_query,
                     &forwarded_headers,
@@ -760,7 +775,7 @@ async fn proxy(State(state): State<AppState>, request: Request) -> Response {
     } else {
         match send_upstream(
             &state,
-            state.baseline.get(protocol),
+            baseline,
             &method,
             &path_and_query,
             &forwarded_headers,
@@ -1261,6 +1276,44 @@ fn required_upstream(base_name: &str, key_name: &str) -> Result<UpstreamBinding>
         base_url: parse_upstream(base_name, &required_env(base_name)?)?,
         api_key: required_env(key_name)?.into(),
     })
+}
+
+fn mechanics_baselines(
+    keys: &[OperatorKey],
+) -> Result<BTreeMap<(Uuid, Protocol), UpstreamBinding>> {
+    let raw = optional_env("MILK_MECHANICS_UPSTREAMS_JSON")?.unwrap_or_else(|| "{}".into());
+    let scopes: BTreeMap<Uuid, BTreeMap<Protocol, ScopedUpstream>> =
+        serde_json::from_str(&raw).context("MILK_MECHANICS_UPSTREAMS_JSON is invalid")?;
+    let mut bindings = BTreeMap::new();
+    for (scope, protocols) in scopes {
+        if protocols.is_empty()
+            || !keys
+                .iter()
+                .any(|key| key.scope_id == scope && key.profile == Profile::Mechanics)
+        {
+            bail!("each mechanics upstream needs a registered mechanics scope and protocol");
+        }
+        for (protocol, upstream) in protocols {
+            let name = &upstream.api_key_env;
+            if name.is_empty()
+                || name.len() > 128
+                || !name.starts_with(|c: char| c.is_ascii_uppercase())
+                || !name
+                    .bytes()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == b'_')
+            {
+                bail!("mechanics upstream api_key_env must name an environment variable");
+            }
+            bindings.insert(
+                (scope, protocol),
+                UpstreamBinding {
+                    base_url: parse_upstream("mechanics upstream base_url", &upstream.base_url)?,
+                    api_key: required_env(name)?.into(),
+                },
+            );
+        }
+    }
+    Ok(bindings)
 }
 
 fn optional_upstream(base_name: &str, key_name: &str) -> Result<Option<UpstreamBinding>> {
