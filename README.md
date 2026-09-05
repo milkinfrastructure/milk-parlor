@@ -13,6 +13,14 @@ failure does not fail the customer request. Parlor needs no database, external
 queue, model weights, or GPU. Milk Man reads the captured exchanges and performs
 the heavier work.
 
+[How Milk works](https://milkinfrastructure.com/) ·
+[Run Milk Man](https://github.com/milkinfrastructure/milk-man#quickstart)
+
+![Official SDK setup in the Milk dashboard](https://raw.githubusercontent.com/milkinfrastructure/milk-man/main/docs/dashboard-overview.png)
+
+The optional local dashboard shows the gateway connection, saved traffic and
+Milk Man's progress. This screenshot is a development snapshot, not live status.
+
 ## Use the hosted gateway
 
 Keep the official OpenAI SDK. Change only its base URL and API key:
