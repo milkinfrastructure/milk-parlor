@@ -190,8 +190,9 @@ The `*_BYTES` variables are integer byte counts.
 
 ## Signed routes
 
-Only production profiles use signed routes; mechanics profiles always use the
-default provider. Missing, invalid, or expired routes also use the default.
+Only production profiles use signed routes. Mechanics profiles use their
+configured scope/protocol upstream, or the shared default when none is set.
+Missing, invalid, or expired production routes use the shared default.
 
 `ops/publish-route.py` requires Python 3, OpenSSL, the AWS CLI, and the S3
 storage variables above. `--candidate-bps` is a basis-point value from 0 to
