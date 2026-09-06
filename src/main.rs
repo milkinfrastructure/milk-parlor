@@ -505,6 +505,12 @@ async fn main() -> Result<()> {
     let client = reqwest::Client::builder()
         .redirect(Policy::none())
         .connect_timeout(Duration::from_secs(10))
+        .read_timeout(Duration::from_secs(env_usize(
+            "MILK_UPSTREAM_READ_TIMEOUT_SECONDS",
+            120,
+            1,
+            3600,
+        )? as u64))
         .pool_idle_timeout(Duration::from_secs(90))
         .build()?;
     let state = AppState {

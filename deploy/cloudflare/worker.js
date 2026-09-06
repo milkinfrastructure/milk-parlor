@@ -40,6 +40,7 @@ function containerEnvironment(bindings) {
     ...Object.fromEntries([
       "MILK_MAX_REQUEST_BYTES", "MILK_MAX_RESPONSE_BYTES",
       "MILK_CAPTURE_MEMORY_BYTES", "MILK_CAPTURE_QUEUE",
+      "MILK_UPSTREAM_READ_TIMEOUT_SECONDS",
       "MILK_CANDIDATE_HEADER_TIMEOUT_SECONDS", "MILK_CANDIDATE_FIRST_BYTE_TIMEOUT_SECONDS",
     ].filter((name) => bindings[name] !== undefined).map((name) => [name, bindings[name]])),
     MILK_LISTEN: "0.0.0.0:8080",

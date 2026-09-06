@@ -31,7 +31,10 @@ For the first deployment, create a private JSON file outside the repository cont
 Add `MILK_CANDIDATE_A_ARTIFACT_SHA256` only with at least one complete native pair: `MILK_CANDIDATE_A_CHAT_BASE_URL` and `MILK_CANDIDATE_A_CHAT_API_KEY`, or `MILK_CANDIDATE_A_RESPONSES_BASE_URL` and `MILK_CANDIDATE_A_RESPONSES_API_KEY`. Add `MILK_STORE_SESSION_TOKEN` only when the S3-compatible backend requires it. Do not commit this file. The Worker fixes only `MILK_LISTEN=0.0.0.0:8080` and `MILK_STORE_KIND=s3`.
 
 Optional Worker bindings pass through the documented request/capture memory
-limits, capture queue and candidate timeouts. `MILK_STORE_REGION=auto`,
+limits, capture queue, candidate timeouts and `MILK_UPSTREAM_READ_TIMEOUT_SECONDS`
+(default 120). This read deadline resets whenever upstream data arrives, so it
+closes stalled responses without limiting an active stream's total duration.
+`MILK_STORE_REGION=auto`,
 `MILK_STORE_PATH_STYLE=true`, `MILK_STORE_TIMEOUT_SECONDS=30` and
 `MILK_ROUTE_POLL_SECONDS=30` are defaults; each can be overridden. Rust validates
 their values. Set nonsecret options in Wrangler `vars`, then use a new instance

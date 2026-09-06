@@ -182,6 +182,7 @@ Optional runtime settings:
 | `MILK_MAX_RESPONSE_BYTES` | 16 MiB | 1 byte–256 MiB |
 | `MILK_CAPTURE_MEMORY_BYTES` | 64 MiB | At least the smaller of the request limit and 64 MiB; at most 4,294,967,295 bytes |
 | `MILK_CAPTURE_QUEUE` | `64` | 1–4,096 |
+| `MILK_UPSTREAM_READ_TIMEOUT_SECONDS` | `120` | 1–3,600; maximum idle time waiting for upstream headers or another response chunk, not total stream duration. |
 | `MILK_ROUTE_POLL_SECONDS` | `30` | 1–3,600 |
 | `MILK_CANDIDATE_HEADER_TIMEOUT_SECONDS` | `30` | 1–300 |
 | `MILK_CANDIDATE_FIRST_BYTE_TIMEOUT_SECONDS` | `120` | 1–600 |
