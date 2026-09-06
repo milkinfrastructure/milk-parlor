@@ -164,11 +164,11 @@ impl RouteManager {
     pub(crate) fn choose(
         &self,
         scope_id: Uuid,
-        production: bool,
+        signed_routing: bool,
         exchange_id: Uuid,
         protocol: Protocol,
     ) -> RouteChoice {
-        if !production {
+        if !signed_routing {
             return RouteChoice {
                 route_id: None,
                 target: Target::Baseline,
@@ -258,7 +258,7 @@ impl RouteManager {
         let expected_revision = self
             .expected_revisions
             .get(&scope_id)
-            .context("production scope has no trusted route revision")?;
+            .context("scope has no trusted route revision")?;
         if pointer.revision != *expected_revision {
             bail!(
                 "route revision {} does not equal trusted revision {}",

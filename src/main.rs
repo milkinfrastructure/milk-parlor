@@ -708,7 +708,7 @@ async fn proxy(State(state): State<AppState>, request: Request) -> Response {
 
     let route = state.routes.choose(
         operator.scope_id,
-        operator.profile == Profile::Production,
+        operator.route_revision.is_some(),
         exchange_id,
         protocol,
     );
@@ -957,12 +957,12 @@ fn parse_keys(raw: &str) -> Result<Vec<OperatorKey>> {
                 bail!("MILK_KEYS_JSON contains a nil scope_id");
             }
             match (binding.profile, binding.route_revision) {
-                (Profile::Production, Some(1..)) | (Profile::Mechanics, None) => {}
+                (_, Some(1..)) | (Profile::Mechanics, None) => {}
                 (Profile::Production, _) => {
                     bail!("each production scope needs a nonzero route_revision")
                 }
                 (Profile::Mechanics, Some(_)) => {
-                    bail!("mechanics scopes must omit route_revision")
+                    bail!("route_revision must be nonzero when set")
                 }
             }
             Ok(OperatorKey {

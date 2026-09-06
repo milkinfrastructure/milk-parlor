@@ -133,7 +133,7 @@ Always required:
 
 | Variable | Meaning |
 | --- | --- |
-| `MILK_KEYS_JSON` | Map of lowercase SHA-256 key digests to `scope_id`, `profile`, and, for production only, a nonzero `route_revision`. Mechanics entries must omit `route_revision`. |
+| `MILK_KEYS_JSON` | Map of lowercase SHA-256 key digests to `scope_id`, `profile`, and a nonzero `route_revision` when using signed routes. Production requires it; mechanics can opt in. |
 | `MILK_BASELINE_CHAT_BASE_URL`, `MILK_BASELINE_CHAT_API_KEY` | Default Chat Completions provider. |
 | `MILK_BASELINE_RESPONSES_BASE_URL`, `MILK_BASELINE_RESPONSES_API_KEY` | Default Responses provider. |
 | `MILK_ROUTE_VERIFY_KEY` | Standard-base64 encoding of the 32-byte Ed25519 public key. |
@@ -190,15 +190,18 @@ The `*_BYTES` variables are integer byte counts.
 
 ## Signed routes
 
-Only production profiles use signed routes. Mechanics profiles use their
-configured scope/protocol upstream, or the shared default when none is set.
-Missing, invalid, or expired production routes use the shared default.
+Production profiles require a signed route revision. Mechanics profiles can
+also set `route_revision` to exercise the same signed routing without relabeling
+their captured data. Without it, mechanics use their configured scope/protocol
+upstream, or the shared default. Missing, invalid or expired signed routes use
+that scope's baseline. Signatures, exact revisions and candidate bindings are
+checked in both profiles.
 
 `ops/publish-route.py` requires Python 3, OpenSSL, the AWS CLI, and the S3
 storage variables above. `--candidate-bps` is a basis-point value from 0 to
 10,000: `100` means 1% and `10000` means 100%. A zero route must omit all
 candidate URL and artifact arguments. After publishing a higher revision,
-redeploy the production key entry with that exact `route_revision`.
+redeploy the scope's key entries with that exact `route_revision`.
 
 Keep the private signing key outside Milk Parlor, Milk Man, CI, and HTTP
 requests.
@@ -223,7 +226,7 @@ Do not combine a proposal with manual candidate URL or artifact arguments.
 These files prove preparation, not a running model or an active route. Run
 without `--output-dir` to sign and publish through S3. Deploy the matching
 candidate URL, credential and artifact environment settings separately, then
-set the production key's exact `route_revision`. A mechanics proposal remains
+set the scope's exact `route_revision`. A mechanics proposal remains
 mechanics evidence; signing it does not establish model quality.
 
 ## Deploy
