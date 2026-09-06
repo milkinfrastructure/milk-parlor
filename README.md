@@ -203,6 +203,29 @@ redeploy the production key entry with that exact `route_revision`.
 Keep the private signing key outside Milk Parlor, Milk Man, CI, and HTTP
 requests.
 
+Use a saved Milk Man proposal instead of retyping its model and URLs:
+
+```bash
+python3 ops/publish-route.py \
+  --proposal-file "$PROPOSAL_FILE" --proposal-sha256 "$PROPOSAL_SHA256" \
+  --signing-key "$SIGNING_KEY" --scope-id "$SCOPE_ID" \
+  --revision "$REVISION" --candidate-bps 100 --expires-at "$EXPIRES_AT" \
+  --output-dir ./prepared-route
+```
+
+`PROPOSAL_SHA256` is the saved reference's SHA-256 of the whole file, not the
+`proposal_sha256` field inside it. The command checks that file and scope,
+then signs its model/URL bindings with your chosen traffic share and expiry.
+Do not combine a proposal with manual candidate URL or artifact arguments.
+
+`--output-dir` creates a new private directory containing `route.json` and
+`current.json`; it makes no cloud calls and needs no AWS CLI or storage keys.
+These files prove preparation, not a running model or an active route. Run
+without `--output-dir` to sign and publish through S3. Deploy the matching
+candidate URL, credential and artifact environment settings separately, then
+set the production key's exact `route_revision`. A mechanics proposal remains
+mechanics evidence; signing it does not establish model quality.
+
 ## Deploy
 
 For the pinned Cloudflare Worker and container workflow, see

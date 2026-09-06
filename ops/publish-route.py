@@ -39,6 +39,8 @@ def canonical(value: dict) -> bytes:
 def candidate_base_url(name: str, raw: str | None) -> str | None:
     if raw is None:
         return None
+    if not isinstance(raw, str):
+        fail(f"{name} must be a URL string")
     parsed = urllib.parse.urlsplit(raw)
     if (
         parsed.scheme not in ("http", "https")
@@ -51,6 +53,43 @@ def candidate_base_url(name: str, raw: str | None) -> str | None:
     ):
         fail(f"{name} must be an HTTP(S) provider base before the /v1 endpoint")
     return raw.rstrip("/")
+
+
+def proposal_candidates(path: Path, expected_sha256: str, scope_id: uuid.UUID) -> tuple[str, dict]:
+    with path.open("rb") as source:
+        body = source.read(65537)
+    if len(body) > 65536 or hashlib.sha256(body).hexdigest() != expected_sha256:
+        fail("proposal file SHA-256 differs or file exceeds 64 KiB")
+    value = json.loads(body)
+    if not isinstance(value, dict) or value.get("schema_version") != "milk.route-proposal.v3" or value.get("scope_id") != str(scope_id):
+        fail("proposal schema or scope differs")
+    identity = {name: value.get(name) for name in (
+        "scope_id", "profile", "candidate", "candidate_artifact_sha256",
+        "candidate_protocols", "candidate_basis_points", "fallback",
+    )}
+    identity["schema_version"] = "milk.route-proposal-identity.v4"
+
+    def milk_digest(item: dict) -> str:
+        return hashlib.sha256((json.dumps(item, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode()).hexdigest()
+
+    identity_sha256 = milk_digest(identity)
+    if value.get("proposal_sha256") != identity_sha256 or value.get("proposal_uuid") != str(uuid.uuid5(uuid.NAMESPACE_URL, "milk:route-proposal:" + identity_sha256)):
+        fail("proposal identity differs")
+    artifact = value.get("candidate_artifact_sha256")
+    protocols = value.get("candidate_protocols")
+    if not isinstance(artifact, str) or re.fullmatch(r"[0-9a-f]{64}", artifact) is None or not isinstance(protocols, dict) or not protocols or protocols.keys() - {"chat_completions", "responses"}:
+        fail("proposal candidate bindings are invalid")
+    urls = {}
+    for protocol, binding in protocols.items():
+        if not isinstance(binding, dict):
+            fail("proposal protocol binding must be an object")
+        base = candidate_base_url(protocol, binding.get("base_url"))
+        if base is None or binding.get("binding_sha256") != milk_digest({"artifact_sha256": artifact, "base_url": base, "protocol": protocol}):
+            fail("proposal protocol binding differs")
+        urls[protocol] = base
+    # The signed gateway route uses its own compact encoding, not Milk Man's
+    # newline-terminated object encoding. The caller recomputes those hashes.
+    return artifact, urls
 
 
 def timestamp(raw: str) -> str:
@@ -199,10 +238,22 @@ def main() -> None:
     parser.add_argument("--candidate-chat-base-url")
     parser.add_argument("--candidate-responses-base-url")
     parser.add_argument("--candidate-artifact-sha256")
+    parser.add_argument("--proposal-file", type=Path)
+    parser.add_argument("--proposal-sha256")
+    parser.add_argument("--output-dir", type=Path, help="save signed route and pointer locally; do not publish")
     parser.add_argument("--expires-at", required=True, type=timestamp)
     parser.add_argument("--valid-from", type=timestamp, default=now())
     parser.add_argument("--route-id", type=uuid.UUID, default=None)
     args = parser.parse_args()
+
+    if bool(args.proposal_file) != bool(args.proposal_sha256):
+        fail("--proposal-file and --proposal-sha256 are required together")
+    if args.proposal_file:
+        if not args.candidate_bps or any((args.candidate_chat_base_url, args.candidate_responses_base_url, args.candidate_artifact_sha256)):
+            fail("proposal input requires nonzero candidate traffic and no manual candidate bindings")
+        args.candidate_artifact_sha256, urls = proposal_candidates(args.proposal_file, args.proposal_sha256, args.scope_id)
+        args.candidate_chat_base_url = urls.get("chat_completions")
+        args.candidate_responses_base_url = urls.get("responses")
 
     if args.scope_id.int == 0 or args.revision < 1:
         fail("scope and revision must be nonzero")
@@ -285,6 +336,14 @@ def main() -> None:
         {**pointer_unsigned, "signature": sign(args.signing_key, canonical(pointer_unsigned))}
     )
 
+    if args.output_dir:
+        args.output_dir.mkdir(mode=0o700, parents=True, exist_ok=False)
+        for name, body in (("route.json", route), ("current.json", pointer)):
+            with (args.output_dir / name).open("xb") as destination:
+                destination.write(body)
+        print(json.dumps({"state": "prepared", "published": False, "scope_id": str(args.scope_id), "revision": args.revision, "route_sha256": route_sha256, "proposal_file_sha256": args.proposal_sha256, "output_dir": str(args.output_dir)}, separators=(",", ":")))
+        return
+
     bucket = required("MILK_STORE_BUCKET")
     environment = aws_environment()
     prefix = f"milk/v2/scopes/{args.scope_id}/r"
@@ -311,6 +370,7 @@ def main() -> None:
                 "candidate_basis_points": args.candidate_bps,
                 "candidate_artifact_sha256": args.candidate_artifact_sha256,
                 "candidate_protocols": candidate_protocols,
+                "proposal_file_sha256": args.proposal_sha256,
                 "route_sha256": route_sha256,
             },
             separators=(",", ":"),
